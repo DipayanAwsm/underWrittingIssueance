@@ -234,7 +234,7 @@ def main():
     
     st.sidebar.success(f"✅ Loaded {len(df)} rows")
     
-    # Save original data before processing
+    # Save original data before any processing/filters (for Excel export)
     original_df = df.copy()
     
     # Data processing
@@ -258,6 +258,21 @@ def main():
         df['createDateTime'] = pd.to_datetime(df['createDateTime'], errors='coerce')
         df['Month'] = df['createDateTime'].dt.to_period('M')
         df['Month_Str'] = df['Month'].astype(str)
+    
+    # High-level filters
+    st.sidebar.header("🔍 Filters")
+    if 'statusDescription' in df.columns:
+        available_statuses = sorted(df['statusDescription'].dropna().unique().tolist())
+        selected_statuses = st.sidebar.multiselect(
+            "Filter by Status Description",
+            options=available_statuses,
+            default=available_statuses,
+            help="Select one or more statuses to filter all metrics and charts."
+        )
+        if selected_statuses:
+            df = df[df['statusDescription'].isin(selected_statuses)]
+    else:
+        st.sidebar.warning("Column 'statusDescription' not found in data for filtering.")
     
     # Main dashboard
     st.header("📈 Key Metrics")
