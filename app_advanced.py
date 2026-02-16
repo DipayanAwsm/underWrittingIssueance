@@ -184,6 +184,46 @@ def main():
             df['Month_Str'] = None
     
     # ===================================================================
+    # Case Type Filter
+    # ===================================================================
+    st.sidebar.header("🔍 Filter Options")
+    
+    if 'CaseType' in df.columns:
+        original_count = len(df)
+        
+        # Filter options
+        filter_option = st.sidebar.radio(
+            "Filter by Case Type:",
+            ["All", "Straight Through", "Multi Hold"],
+            index=0  # Default to "All"
+        )
+        
+        if filter_option == "Straight Through":
+            # Filter to only Straight Through cases
+            df_filtered = df[df['CaseType'] == 'Straight Through'].copy()
+            filtered_count = len(df_filtered)
+            excluded_count = original_count - filtered_count
+            st.sidebar.success(f"✅ Showing: {filtered_count:,} Straight Through cases")
+            st.sidebar.info(f"📊 Excluded: {excluded_count:,} cases")
+            df = df_filtered
+        elif filter_option == "Multi Hold":
+            # Filter to Multi Hold cases (includes One Touch and Multi Hold)
+            df_filtered = df[
+                (df['CaseType'] == 'One Touch') | 
+                (df['CaseType'].str.contains('Multi Hold', na=False))
+            ].copy()
+            filtered_count = len(df_filtered)
+            excluded_count = original_count - filtered_count
+            st.sidebar.success(f"✅ Showing: {filtered_count:,} cases (One Touch + Multi Hold)")
+            st.sidebar.info(f"📊 Excluded: {excluded_count:,} cases")
+            df = df_filtered
+        else:
+            # "All" option - no filtering
+            st.sidebar.info(f"📊 Showing all {original_count:,} cases")
+    else:
+        st.sidebar.warning("⚠️ CaseType column not available for filtering")
+    
+    # ===================================================================
     # 0. Overall Summary - Total Cases and Percent-wise Analysis
     # ===================================================================
     st.header("0. Overall Summary - Total Cases and Percent-wise Analysis")
