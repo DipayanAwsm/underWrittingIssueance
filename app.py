@@ -65,29 +65,34 @@ def load_data(file_path_or_buffer):
         return None
 
 def parse_separated_values(value, separator=None):
-    """Parse values that may be separated by ', ' or '|'"""
+    """Parse values that may be separated by ',' (with or without space) or '|'"""
     if pd.isna(value) or value == '':
         return []
-    
+
     value = str(value).strip()
+    if not value:
+        return []
+
     if separator:
         separators = [separator]
     else:
-        # Try to detect separator
+        # Try to detect separator: pipe, comma-space, then plain comma
         if '|' in value:
             separators = ['|']
         elif ', ' in value:
             separators = [', ']
+        elif ',' in value:
+            separators = [',']
         else:
-            return [value] if value else []
-    
+            return [value]
+
     result = []
     for sep in separators:
         if sep in value:
             result = [v.strip() for v in value.split(sep) if v.strip()]
             break
-    
-    return result if result else [value] if value else []
+
+    return result if result else [value]
 
 def calculate_aging(df):
     """Calculate aging in days for non-completed cases"""

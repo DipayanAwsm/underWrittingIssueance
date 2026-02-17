@@ -32,7 +32,7 @@ import plotly.io as pio
 
 
 def parse_separated_values(value: Any, separator: str | None = None) -> List[str]:
-    """Parse values that may be separated by ', ' or '|' into a list."""
+    """Parse values that may be separated by ',' (with or without space) or '|' into a list."""
     if pd.isna(value) or value == "":
         return []
 
@@ -43,10 +43,13 @@ def parse_separated_values(value: Any, separator: str | None = None) -> List[str
     if separator:
         separators = [separator]
     else:
+        # Try to detect separator: pipe, comma-space, then plain comma
         if "|" in text:
             separators = ["|"]
         elif ", " in text:
             separators = [", "]
+        elif "," in text:
+            separators = [","]
         else:
             return [text]
 
