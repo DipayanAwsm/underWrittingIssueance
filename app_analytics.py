@@ -609,33 +609,59 @@ def main():
                     
                     st.dataframe(mh_hold_time_stats)
             
-            # 5f. Month-wise seasonality of editReason
-            if 'editReason' in multi_hold_cases.columns and 'Month_Str' in multi_hold_cases.columns:
-                st.subheader("5f. Edit Reason Seasonality (Multi-Hold Cases)")
-                
-                edit_reason_monthly = multi_hold_cases.groupby(['Month_Str', 'editReason']).size().reset_index(name='Count')
-                edit_reason_monthly = edit_reason_monthly.sort_values(['Month_Str', 'Count'], ascending=[True, False])
-                
-                fig_edit_reason = px.bar(
-                    edit_reason_monthly,
-                    x='Month_Str',
-                    y='Count',
-                    color='editReason',
-                    title="Edit Reason Distribution by Month (Multi-Hold Cases)",
-                    labels={'Month_Str': 'Month', 'Count': 'Count'},
-                    barmode='stack'
-                )
-                fig_edit_reason.update_xaxes(tickangle=45)
-                st.plotly_chart(fig_edit_reason, use_container_width=True)
-                
-                st.dataframe(edit_reason_monthly)
         else:
             st.info("No multi-hold completed cases found")
     
     # ===================================================================
-    # 6. Number of Locations and Vehicles with Request Type (Month-wise)
+    # 6. Holding Time for Straight Through Cases (Month-wise)
     # ===================================================================
-    st.header("6. Number of Locations and Vehicles with Request Type (Month-wise)")
+    st.header("6. Holding Time for Straight Through Cases (Month-wise)")
+
+    if 'CaseType' in df.columns and 'Month_Str' in df.columns and 'TotalHoldingTime' in df.columns:
+        st_cases = df[df['CaseType'] == 'Straight Through'].copy()
+
+        if not st_cases.empty:
+            st_ht_monthly = st_cases.groupby('Month_Str').agg({
+                'TotalHoldingTime': ['median', 'mean', 'count']
+            }).reset_index()
+            st_ht_monthly.columns = ['Month', 'Median_HoldingTime_Days', 'Average_HoldingTime_Days', 'Count']
+            st_ht_monthly = st_ht_monthly.sort_values('Month')
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_st_ht_median = px.line(
+                    st_ht_monthly,
+                    x='Month',
+                    y='Median_HoldingTime_Days',
+                    title="Median Holding Time (Days) - Straight Through Cases by Month",
+                    labels={'Month': 'Month', 'Median_HoldingTime_Days': 'Median Holding Time (Days)'},
+                    markers=True
+                )
+                fig_st_ht_median.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_st_ht_median, use_container_width=True)
+
+            with col2:
+                fig_st_ht_avg = px.line(
+                    st_ht_monthly,
+                    x='Month',
+                    y='Average_HoldingTime_Days',
+                    title="Average Holding Time (Days) - Straight Through Cases by Month",
+                    labels={'Month': 'Month', 'Average_HoldingTime_Days': 'Average Holding Time (Days)'},
+                    markers=True
+                )
+                fig_st_ht_avg.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_st_ht_avg, use_container_width=True)
+
+            st.markdown("**Note:** Holding time is measured in **days**, based on the difference between "
+                        "`onHoldDatesHistory` and `offHoldDatesHistory` for each hold period.")
+            st.dataframe(st_ht_monthly)
+        else:
+            st.info("No Straight Through cases found for holding time analysis.")
+
+    # ===================================================================
+    # 7. Number of Locations and Vehicles with Request Type (Month-wise)
+    # ===================================================================
+    st.header("7. Number of Locations and Vehicles with Request Type (Month-wise)")
     
     if 'numberOfLocations' in df.columns and 'NumberOfVehicles' in df.columns and 'requestTypeDescription' in df.columns and 'Month_Str' in df.columns:
         lv_data = df[
@@ -662,30 +688,119 @@ def main():
             fig_loc_req.update_xaxes(tickangle=45)
             st.plotly_chart(fig_loc_req, use_container_width=True)
             
-            # Vehicles with Request Type by Month
-            veh_request_monthly = lv_data.groupby(['Month_Str', 'NumberOfVehicles', 'requestTypeDescription']).size().reset_index(name='Count')
-            veh_request_monthly = veh_request_monthly.sort_values(['Month_Str', 'Count'], ascending=[True, False])
-            
-            fig_veh_req = px.bar(
-                veh_request_monthly,
-                x='Month_Str',
-                y='Count',
-                color='requestTypeDescription',
-                facet_col='NumberOfVehicles',
-                title="Request Type Count by Number of Vehicles (Month-wise)",
-                labels={'Month_Str': 'Month', 'Count': 'Count'},
-                barmode='stack'
-            )
-            fig_veh_req.update_xaxes(tickangle=45)
-            st.plotly_chart(fig_veh_req, use_container_width=True)
-            
+            # Vehicles banding (groups of 4) and count of cases with holding time
+            # Create vehicle bands: 1-4, 5-8, 9-12, ...
+            lv_data = lv_data.copy()
+            lv_data['NumberOfVehicles'] = lv_data['NumberOfVehicles'].astype(int)
+            band_start = ((lv_data['NumberOfVehicles'] - 1) // 4) * 4 + 1
+            band_end = band_start + 3
+            lv_data['VehicleBand'] = band_start.astype(str) + '-' + band_end.astype(str)
+
+            # Only cases with holding time > 0
+            hv_band = lv_data[lv_data['TotalHoldingTime'] > 0].copy()
+            if not hv_band.empty:
+                vehicle_band_counts = hv_band.groupby('VehicleBand').size().reset_index(name='Cases_With_HoldingTime')
+                vehicle_band_counts = vehicle_band_counts.sort_values('VehicleBand')
+
+                fig_veh_band = px.bar(
+                    vehicle_band_counts,
+                    x='VehicleBand',
+                    y='Cases_With_HoldingTime',
+                    title="Cases with Holding Time by Vehicle Band (4 vehicles per band)",
+                    labels={'VehicleBand': 'Number of Vehicles (Band)', 'Cases_With_HoldingTime': 'Number of Cases'}
+                )
+                st.plotly_chart(fig_veh_band, use_container_width=True)
+
+                st.dataframe(vehicle_band_counts)
+            else:
+                st.info("No cases with holding time found for vehicle band analysis.")
+
             st.dataframe(loc_request_monthly)
-            st.dataframe(veh_request_monthly)
     
     # ===================================================================
-    # 7. Write-Out Reason Description Seasonality (Month-wise)
+    # 8. On-Hold Reason Seasonality (Month-wise Counts)
     # ===================================================================
-    st.header("7. Write-Out Reason Description Seasonality (Month-wise)")
+    st.header("8. On-Hold Reason Seasonality (Month-wise Counts)")
+
+    if 'onHoldReasonDescriptionsHistory' in df.columns and 'Month_Str' in df.columns:
+        records_hr = []
+        for _, row in df.iterrows():
+            month = row.get('Month_Str')
+            if pd.isna(month) or month is None:
+                continue
+            reasons = parse_separated_values(row.get('onHoldReasonDescriptionsHistory', ''))
+            for r in reasons:
+                records_hr.append({'Month_Str': month, 'HoldReason': r})
+
+        if records_hr:
+            hr_df = pd.DataFrame(records_hr)
+
+            # Overall top 10 hold reasons to keep chart readable
+            top_reasons = (
+                hr_df['HoldReason']
+                .value_counts()
+                .head(10)
+                .index
+                .tolist()
+            )
+            hr_top = hr_df[hr_df['HoldReason'].isin(top_reasons)]
+
+            # Month-wise counts
+            hr_monthly = (
+                hr_top.groupby(['Month_Str', 'HoldReason'])
+                .size()
+                .reset_index(name='Count')
+                .sort_values(['Month_Str', 'Count'], ascending=[True, False])
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_hr_counts = px.bar(
+                    hr_monthly,
+                    x='Month_Str',
+                    y='Count',
+                    color='HoldReason',
+                    title="On-Hold Reasons by Month (Top 10 Overall)",
+                    labels={'Month_Str': 'Month', 'Count': 'Count', 'HoldReason': 'Hold Reason'},
+                    barmode='stack'
+                )
+                fig_hr_counts.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hr_counts, use_container_width=True)
+
+            with col2:
+                # Percentage within each month
+                month_totals = (
+                    hr_monthly.groupby('Month_Str')['Count']
+                    .sum()
+                    .reset_index(name='Month_Total')
+                )
+                pct_df = hr_monthly.merge(month_totals, on='Month_Str', how='left')
+                pct_df['Percentage'] = (pct_df['Count'] / pct_df['Month_Total'] * 100).round(2)
+
+                fig_hr_pct = px.bar(
+                    pct_df,
+                    x='Month_Str',
+                    y='Percentage',
+                    color='HoldReason',
+                    title="On-Hold Reasons % by Month (Top 10 Overall)",
+                    labels={'Month_Str': 'Month', 'Percentage': 'Percentage (%)', 'HoldReason': 'Hold Reason'},
+                    barmode='stack'
+                )
+                fig_hr_pct.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hr_pct, use_container_width=True)
+
+            st.subheader("On-Hold Reasons by Month - Detail")
+            st.dataframe(hr_monthly)
+        else:
+            st.info("No on-hold reasons found to analyze seasonality.")
+    else:
+        st.warning("⚠️ Required columns not found: onHoldReasonDescriptionsHistory or Month_Str")
+
+    # ===================================================================
+    # 9. Write-Out Reason Description Seasonality (Month-wise)
+    # ===================================================================
+    st.header("9. Write-Out Reason Description Seasonality (Month-wise)")
+    st.header("9. Write-Out Reason Description Seasonality (Month-wise)")
     
     writeout_col = None
     if 'writeOutReasonDescriptionsHistory' in df.columns:
