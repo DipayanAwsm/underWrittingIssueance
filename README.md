@@ -78,20 +78,24 @@ The classification is based on parsing `onHoldReasonDescriptionsHistory`:
 - **Straight Through**: If `onHoldReasonDescriptionsHistory` is blank or empty
   - No holds were placed on the case
   - Case processed without interruption
+  - Number of touches = 0
 
 - **One Touch**: If `onHoldReasonDescriptionsHistory` contains exactly one hold reason
   - Case was placed on hold once
   - Single touch point in the process
+  - Number of touches = 1
 
 - **Multi Hold (N touches)**: If `onHoldReasonDescriptionsHistory` contains multiple hold reasons
   - Number of touches = count of separated values
   - Values can be separated by ', ' (comma-space) or '|' (pipe)
   - Example: "Reason1, Reason2" or "Reason1|Reason2" = 2 touches
+  - Example: "Reason1, Reason2, Reason3" = 3 touches
 
 **Parsing Logic:**
 - First checks for '|' separator
 - If not found, checks for ', ' separator
 - Splits the string and counts non-empty values
+- If blank/empty → Straight Through (0 touches)
 
 **Purpose:** Categorize cases based on process complexity and identify bottlenecks
 

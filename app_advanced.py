@@ -88,10 +88,10 @@ def parse_separated_values(value, separator=None):
     return result if result else ([value] if value else [])
 
 
-def classify_case_type_by_dates(on_hold_dates_history):
-    """Classify case type based on number of touches from onHoldDatesHistory"""
-    dates = parse_separated_values(on_hold_dates_history)
-    num_touches = len(dates)
+def classify_case_type_by_reasons(on_hold_reasons_history):
+    """Classify case type based on number of touches from onHoldReasonDescriptionsHistory"""
+    reasons = parse_separated_values(on_hold_reasons_history)
+    num_touches = len(reasons)
     
     if num_touches == 0:
         return 'Straight Through', 0
@@ -165,13 +165,13 @@ def main():
         # Calculate TAT
         df = calculate_tat(df)
         
-        # 1. Case Type Classification based on onHoldDatesHistory
-        if 'onHoldDatesHistory' in df.columns:
-            case_type_results = df['onHoldDatesHistory'].apply(classify_case_type_by_dates)
+        # 1. Case Type Classification based on onHoldReasonDescriptionsHistory
+        if 'onHoldReasonDescriptionsHistory' in df.columns:
+            case_type_results = df['onHoldReasonDescriptionsHistory'].apply(classify_case_type_by_reasons)
             df['CaseType'] = [r[0] for r in case_type_results]
             df['NumberOfTouches'] = [r[1] for r in case_type_results]
         else:
-            st.warning("⚠️ Column 'onHoldDatesHistory' not found. Case type classification skipped.")
+            st.warning("⚠️ Column 'onHoldReasonDescriptionsHistory' not found. Case type classification skipped.")
             df['CaseType'] = 'Unknown'
             df['NumberOfTouches'] = 0
         
@@ -289,9 +289,9 @@ def main():
         st.dataframe(summary_df)
     
     # ===================================================================
-    # 1. Case Type Classification (based on onHoldDatesHistory)
+    # 1. Case Type Classification (based on onHoldReasonDescriptionsHistory)
     # ===================================================================
-    st.header("1. Case Type Classification (Based on onHoldDatesHistory)")
+    st.header("1. Case Type Classification (Based on onHoldReasonDescriptionsHistory)")
     
     if 'CaseType' in df.columns:
         case_type_counts = df['CaseType'].value_counts()
