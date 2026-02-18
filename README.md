@@ -1,21 +1,53 @@
 # Underwriting Issuance Dashboard
 
-A comprehensive Streamlit-based dashboard for analyzing underwriting issuance data with advanced analytics and reporting capabilities.
+A comprehensive Streamlit-based dashboard suite for analyzing underwriting issuance data with advanced analytics and reporting capabilities.
 
-## Features
+## Applications
 
-This dashboard provides detailed analysis of underwriting issuance data including:
+This project includes three main Streamlit applications:
 
-1. **Status Count Analysis** - Count of cases by status description
-2. **Aging Analysis** - Days since creation for non-completed cases
-3. **Case Type Classification** - Straight-through, one-touch, and multi-hold classification
-4. **Holding Time Analysis** - Time spent on hold for each case
-5. **Turnaround Time (TAT) Analysis** - Time to complete cases
-6. **TAT Buckets** - Categorization of TAT into 0-5, 5-7, and 7+ days
-7. **Drill-Down Analysis** - Detailed analysis by TAT bucket or number of touches
-8. **Seasonality Analysis** - Monthly trends in completion and holding rates
-9. **Location and Vehicle Analysis** - Impact of locations and vehicles on processing time
-10. **Excel Export** - Comprehensive report generation
+### 1. **app.py** - Main Dashboard
+The primary dashboard with comprehensive analysis including status counts, aging, case classification, TAT analysis, seasonality, and Excel export.
+
+**Run:** `streamlit run app.py`
+
+### 2. **app_advanced.py** - Advanced Visualizations
+Advanced analytics focusing on:
+- Case type classification based on `onHoldReasonDescriptionsHistory`
+- Request type TAT seasonality (median & average) with status
+- Multi-hold cases seasonality and request type analysis
+- Number of vehicles and locations TAT analysis
+- Top 5 analysis for multi-hold cases (request types, hold reasons, BGI descriptions)
+- On-hold reason seasonality month-wise
+- Average TAT by request type and write-out reason (top 5)
+
+**Run:** `streamlit run app_advanced.py`
+
+### 3. **app_analytics.py** - Analytics Dashboard
+Focused analytics dashboard emphasizing:
+- Holding reasons analysis
+- Holding time analysis
+- TAT (Turnaround Time) analysis
+- Month-wise seasonality of all metrics
+- Number of touches analysis from `onHoldReasonDescriptionsHistory`
+- Vehicle banding analysis (groups of 4)
+- Write-out reason seasonality
+
+**Run:** `streamlit run app_analytics.py`
+
+## Additional Tools
+
+### Batch Processing Script
+**underwriting_batch.py** - Standalone Python script for batch processing:
+- Generates Excel reports with all analyses
+- Creates interactive HTML charts
+- Generates PNG images of visualizations
+- Consolidates all charts into a single HTML file
+
+**Run:** `python underwriting_batch.py --input data/your_file.csv --output report.xlsx`
+
+### Jupyter Notebook
+**underwriting_analysis.ipynb** - Jupyter notebook version of the analysis for interactive exploration and experimentation.
 
 ## Installation
 
@@ -24,9 +56,11 @@ This dashboard provides detailed analysis of underwriting issuance data includin
 pip install -r requirements.txt
 ```
 
-2. Run the Streamlit app:
+2. Run any of the Streamlit apps:
 ```bash
-streamlit run app.py
+streamlit run app.py              # Main dashboard
+streamlit run app_advanced.py     # Advanced visualizations
+streamlit run app_analytics.py    # Analytics dashboard
 ```
 
 ## Data Requirements
@@ -36,13 +70,16 @@ The dashboard accepts CSV or Excel files with the following key columns:
 - `statusDescription` - Status of the case
 - `createDateTime` - Date and time when case was created
 - `completedDateTime` - Date and time when case was completed (can be empty)
-- `onHoldReasonDescriptionsHistory` - History of hold reasons (separated by ', ' or '|')
-- `onHoldDatesHistory` - History of on-hold dates (separated by ', ' or '|')
-- `offHoldDatesHistory` - History of off-hold dates (separated by ', ' or '|')
+- `onHoldReasonDescriptionsHistory` - History of hold reasons (separated by ',' or ', ' or '|')
+- `onHoldDatesHistory` - History of on-hold dates (separated by ',' or ', ' or '|')
+- `offHoldDatesHistory` - History of off-hold dates (separated by ',' or ', ' or '|')
 - `requestTypeDescription` - Type of request
 - `onHoldReasonDescription` - Current hold reason
+- `writeOutReasonDescriptionsHistory` or `writeOutReasonDescription` - Write-out reasons
 - `numberOfLocations` - Number of locations
 - `NumberOfVehicles` - Number of vehicles
+- `bgiDescription` - BGI description (optional)
+- `editReason` - Edit reason (optional)
 
 ## Field Calculations
 
@@ -87,15 +124,20 @@ The classification is based on parsing `onHoldReasonDescriptionsHistory`:
 
 - **Multi Hold (N touches)**: If `onHoldReasonDescriptionsHistory` contains multiple hold reasons
   - Number of touches = count of separated values
-  - Values can be separated by ', ' (comma-space) or '|' (pipe)
-  - Example: "Reason1, Reason2" or "Reason1|Reason2" = 2 touches
+  - Values can be separated by ',' (comma), ', ' (comma-space), or '|' (pipe)
+  - Example: "Reason1,Reason2" = 2 touches
+  - Example: "Reason1, Reason2" = 2 touches
+  - Example: "Reason1|Reason2" = 2 touches
   - Example: "Reason1, Reason2, Reason3" = 3 touches
 
 **Parsing Logic:**
 - First checks for '|' separator
-- If not found, checks for ', ' separator
+- If not found, checks for ', ' (comma-space) separator
+- If not found, checks for ',' (comma) separator
 - Splits the string and counts non-empty values
 - If blank/empty → Straight Through (0 touches)
+
+**Note:** The primary data format uses comma-separated values (with or without spaces). Pipe separators are supported for backward compatibility.
 
 **Purpose:** Categorize cases based on process complexity and identify bottlenecks
 
@@ -117,27 +159,46 @@ TotalHoldingTime = Sum of all individual holding times
 ```
 
 **Details:**
-- Parses both date columns using the same separator logic (', ' or '|')
+- Parses both date columns using separator logic (',', ', ', or '|')
 - Matches each on-hold date with corresponding off-hold date by index
+- Each holding time is calculated as: `offHoldDate - onHoldDate` (in days)
 - If an off-hold date is missing, calculates from on-hold date to current date
 - Stores individual holding times in `HoldingTimes` list
 - `TotalHoldingTime` is the sum of all holding periods
+- **Unit:** All holding times are measured in **days**
 
-**Purpose:** Measure the total time cases spend on hold, identifying process delays
+**Month-wise Analysis for Straight Through Cases:**
+- Median holding time by month
+- Average holding time by month
+- Case counts with holding time by month
+
+**Purpose:** Measure the total time cases spend on hold, identifying process delays, analyze holding patterns for straight-through cases
 
 ---
 
-### 5. Number of Touches (`NumberOfTouches`)
+### 5. Number of Touches (`NumberOfTouches`, `Touches_Reasons`)
 
 **Calculation:**
 ```python
+# Based on onHoldReasonDescriptionsHistory
+Reasons = Parse(onHoldReasonDescriptionsHistory)
+NumberOfTouches = Count of separated values in Reasons
+
+# Also equals:
 NumberOfTouches = Count of items in HoldingTimes list
 ```
 
-- Directly corresponds to the number of hold periods
-- Equals the number of entries in `onHoldReasonDescriptionsHistory` (after parsing)
+- Directly corresponds to the number of hold reasons in `onHoldReasonDescriptionsHistory`
+- Equals the number of entries after parsing (separated by ',', ', ', or '|')
+- Also equals the number of hold periods (from `onHoldDatesHistory` and `offHoldDatesHistory`)
 
-**Purpose:** Quantify process complexity and identify cases requiring multiple interventions
+**Month-wise Analysis:**
+- Median number of touches per case by month
+- Average number of touches per case by month
+- Distribution of touches (0, 1, 2, 3, ...) per month
+- Total touches and case counts by month
+
+**Purpose:** Quantify process complexity and identify cases requiring multiple interventions, analyze touch patterns over time
 
 ---
 
@@ -380,20 +441,30 @@ For each unique NumberOfVehicles:
 The dashboard handles data that may contain separated values in single cells:
 
 ### Separator Detection:
+The parser automatically detects separators in this order:
 1. First checks for '|' (pipe) separator
 2. If not found, checks for ', ' (comma-space) separator
-3. If neither found, treats entire value as single item
+3. If not found, checks for ',' (comma without space) separator
+4. If none found, treats entire value as single item
 
 ### Example Parsing:
+- Input: `"Reason1,Reason2,Reason3"` → Output: `["Reason1", "Reason2", "Reason3"]`
 - Input: `"Reason1, Reason2, Reason3"` → Output: `["Reason1", "Reason2", "Reason3"]`
 - Input: `"Reason1|Reason2"` → Output: `["Reason1", "Reason2"]`
 - Input: `"Reason1"` → Output: `["Reason1"]`
 - Input: `""` or `NaN` → Output: `[]`
 
+### Columns Using Parsing:
+- `onHoldReasonDescriptionsHistory` - Parsed to count touches and analyze hold reasons
+- `onHoldDatesHistory` - Parsed to extract individual on-hold dates
+- `offHoldDatesHistory` - Parsed to extract individual off-hold dates
+- `writeOutReasonDescriptionsHistory` - Parsed to analyze write-out reasons
+
 ### Date Parsing:
 - Uses `pd.to_datetime()` with error handling
 - Invalid dates are coerced to `NaT` (Not a Time)
 - Only valid dates are used in calculations
+- Dates are matched by index position between `onHoldDatesHistory` and `offHoldDatesHistory`
 
 ---
 
@@ -448,17 +519,62 @@ The dashboard generates a comprehensive Excel report with the following sheets:
 
 ## Usage
 
+### Streamlit Apps
+
 1. **Upload Data:**
    - Choose "Upload File" to upload a CSV or Excel file
    - Or choose "Data Folder" to select from existing files in the `data/` folder
 
-2. **View Analysis:**
-   - Navigate through different sections using the scrollable dashboard
-   - Interactive charts allow zooming and filtering
+2. **Apply Filters:**
+   - **app.py**: Filter by `statusDescription` in the sidebar
+   - **app_advanced.py**: Filter by Case Type (All Cases, Straight Through, Multi Hold Only)
+   - **app_analytics.py**: 
+     - Filter by Case Type (All Cases, Straight Through, Multi Hold Only)
+     - Filter by Created Date Range (Monthly selector: All, Jan, Feb, etc.)
 
-3. **Export Results:**
-   - Click "Generate Excel Report" to create a comprehensive report
+3. **View Analysis:**
+   - Navigate through different sections using the scrollable dashboard
+   - Interactive charts allow zooming, panning, and filtering
+   - Hover over charts to see detailed values
+
+4. **Export Results:**
+   - **app.py**: Click "Generate Excel Report" to create a comprehensive report
    - Download the generated Excel file
+
+### Batch Processing
+
+Run the batch script to generate reports without the Streamlit interface:
+
+```bash
+python underwriting_batch.py --input data/your_file.csv --output report.xlsx
+```
+
+This will generate:
+- Excel file with all analyses in separate sheets
+- Individual HTML charts for key metrics
+- PNG images of visualizations
+- Consolidated HTML file with all charts (`*_all_charts.html`)
+
+### Key Features by App
+
+**app.py:**
+- Comprehensive analysis with Excel export
+- Status-based filtering
+- Original data preservation
+
+**app_advanced.py:**
+- Advanced case type classification
+- Request type TAT seasonality
+- Multi-hold specific analyses
+- Top 5 analysis for multi-hold cases
+- Write-out reason TAT analysis
+
+**app_analytics.py:**
+- Focus on holding reasons, holding time, and TAT
+- Month-wise seasonality for all metrics
+- Number of touches analysis
+- Vehicle banding (groups of 4)
+- Write-out reason seasonality
 
 ---
 
@@ -478,6 +594,30 @@ The dashboard generates a comprehensive Excel report with the following sheets:
 - **NumPy** - Numerical computations
 - **Plotly** - Interactive visualizations
 - **OpenPyXL** - Excel file generation
+- **Kaleido** - Static image export (for PNG charts)
+
+## Additional Features
+
+### Number of Touches Analysis
+- Month-wise median and average touches
+- Distribution of touches (0, 1, 2, 3+) by month
+- Based on parsing `onHoldReasonDescriptionsHistory`
+
+### Vehicle Banding
+- Groups vehicles into bands of 4 (1-4, 5-8, 9-12, etc.)
+- Counts cases with holding time per vehicle band
+- Helps identify patterns in vehicle count vs. holding time
+
+### On-Hold Reason Seasonality
+- Month-wise count of each hold reason
+- Percentage distribution by month
+- Top 10 hold reasons analysis
+- Parsed from `onHoldReasonDescriptionsHistory`
+
+### Write-Out Reason Analysis
+- Month-wise seasonality of write-out reasons
+- Average TAT by request type and write-out reason (top 5)
+- Parsed from `writeOutReasonDescriptionsHistory` or `writeOutReasonDescription`
 
 ---
 

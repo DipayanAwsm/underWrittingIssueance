@@ -206,11 +206,12 @@ def main():
         if 'onHoldReasonDescriptionsHistory' in df.columns:
             case_type_results = df['onHoldReasonDescriptionsHistory'].apply(classify_case_type_by_reasons)
             df['CaseType'] = [r[0] for r in case_type_results]
-            df['NumberOfTouches'] = [r[1] for r in case_type_results]
+            # Number of touches from reasons (will keep separately to avoid overwriting holding-based touches)
+            df['Touches_Reasons'] = [r[1] for r in case_type_results]
         else:
             st.warning("⚠️ Column 'onHoldReasonDescriptionsHistory' not found.")
             df['CaseType'] = 'Unknown'
-            df['NumberOfTouches'] = 0
+            df['Touches_Reasons'] = 0
         
         # Calculate holding times
         df = calculate_holding_times(df)
@@ -803,10 +804,418 @@ def main():
         st.warning("⚠️ Required columns not found: onHoldReasonDescriptionsHistory or Month_Str")
 
     # ===================================================================
-    # 9. Write-Out Reason Description Seasonality (Month-wise)
+    # 9. Number of Touches (from onHoldReasonDescriptionsHistory) by Month
     # ===================================================================
-    st.header("9. Write-Out Reason Description Seasonality (Month-wise)")
-    st.header("9. Write-Out Reason Description Seasonality (Month-wise)")
+    st.header("9. Number of Touches (from onHoldReasonDescriptionsHistory) by Month")
+
+    if 'Touches_Reasons' in df.columns and 'Month_Str' in df.columns:
+        touches_month = (
+            df.groupby('Month_Str')['Touches_Reasons']
+            .agg(['median', 'mean', 'sum', 'count'])
+            .reset_index()
+            .rename(columns={
+                'Month_Str': 'Month',
+                'median': 'Median_Touches',
+                'mean': 'Average_Touches',
+                'sum': 'Total_Touches',
+                'count': 'Case_Count'
+            })
+            .sort_values('Month')
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            fig_touch_med = px.line(
+                touches_month,
+                x='Month',
+                y='Median_Touches',
+                title="Median Number of Touches per Case by Month",
+                labels={'Month': 'Month', 'Median_Touches': 'Median Touches'},
+                markers=True
+            )
+            fig_touch_med.update_xaxes(tickangle=45)
+            st.plotly_chart(fig_touch_med, use_container_width=True)
+
+        with col2:
+            fig_touch_avg = px.line(
+                touches_month,
+                x='Month',
+                y='Average_Touches',
+                title="Average Number of Touches per Case by Month",
+                labels={'Month': 'Month', 'Average_Touches': 'Average Touches'},
+                markers=True
+            )
+            fig_touch_avg.update_xaxes(tickangle=45)
+            st.plotly_chart(fig_touch_avg, use_container_width=True)
+
+        # Distribution of touches per month (0,1,2,3,...)
+        touches_dist = (
+            df.groupby(['Month_Str', 'Touches_Reasons'])
+            .size()
+            .reset_index(name='Count')
+            .sort_values(['Month_Str', 'Touches_Reasons'])
+        )
+        fig_touch_dist = px.bar(
+            touches_dist,
+            x='Month_Str',
+            y='Count',
+            color='Touches_Reasons',
+            title="Distribution of Number of Touches per Month",
+            labels={'Month_Str': 'Month', 'Count': 'Case Count', 'Touches_Reasons': 'Number of Touches'},
+            barmode='stack'
+        )
+        fig_touch_dist.update_xaxes(tickangle=45)
+        st.plotly_chart(fig_touch_dist, use_container_width=True)
+
+        st.subheader("Number of Touches per Month - Detail")
+        st.dataframe(touches_month)
+    else:
+        st.warning("⚠️ Required columns not found: Touches_Reasons or Month_Str")
+
+    # ===================================================================
+    # 10. Prescriptive Analysis: Reasons for Hold Delay
+    # ===================================================================
+    st.header("10. Prescriptive Analysis: Reasons for Hold Delay")
+    
+    if 'onHoldReasonDescriptionsHistory' in df.columns and 'HoldingTimes' in df.columns:
+        delay_records = []
+        for _, row in df.iterrows():
+            reasons = parse_separated_values(row.get('onHoldReasonDescriptionsHistory', ''))
+            holding_times = row.get('HoldingTimes', [])
+            
+            if reasons and holding_times:
+                for i, reason in enumerate(reasons):
+                    if i < len(holding_times):
+                        delay_records.append({
+                            'HoldReason': reason,
+                            'HoldingTime': holding_times[i],
+                            'CaseType': row.get('CaseType', 'Unknown')
+                        })
+        
+        if delay_records:
+            delay_df = pd.DataFrame(delay_records)
+            
+            # Calculate statistics by hold reason
+            delay_stats = delay_df.groupby('HoldReason').agg({
+                'HoldingTime': ['median', 'mean', 'count', 'max']
+            }).reset_index()
+            delay_stats.columns = ['HoldReason', 'Median_HoldingTime', 'Average_HoldingTime', 'Count', 'Max_HoldingTime']
+            delay_stats = delay_stats.sort_values('Average_HoldingTime', ascending=False)
+            
+            st.subheader("10a. Hold Reasons Causing Longest Delays")
+            st.markdown("**Analysis:** Identifying which hold reasons result in the longest holding times")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_delay_median = px.bar(
+                    delay_stats.head(15),
+                    x='HoldReason',
+                    y='Median_HoldingTime',
+                    title="Median Holding Time by Hold Reason (Top 15)",
+                    labels={'HoldReason': 'Hold Reason', 'Median_HoldingTime': 'Median Holding Time (Days)'},
+                    color='Median_HoldingTime',
+                    color_continuous_scale='Reds'
+                )
+                fig_delay_median.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_delay_median, use_container_width=True)
+            
+            with col2:
+                fig_delay_avg = px.bar(
+                    delay_stats.head(15),
+                    x='HoldReason',
+                    y='Average_HoldingTime',
+                    title="Average Holding Time by Hold Reason (Top 15)",
+                    labels={'HoldReason': 'Hold Reason', 'Average_HoldingTime': 'Average Holding Time (Days)'},
+                    color='Average_HoldingTime',
+                    color_continuous_scale='Oranges'
+                )
+                fig_delay_avg.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_delay_avg, use_container_width=True)
+            
+            # Show top delay reasons
+            st.subheader("10b. Top Hold Reasons by Delay Impact")
+            top_delay_reasons = delay_stats.head(10).copy()
+            top_delay_reasons['Total_Delay_Days'] = top_delay_reasons['Average_HoldingTime'] * top_delay_reasons['Count']
+            top_delay_reasons = top_delay_reasons.sort_values('Total_Delay_Days', ascending=False)
+            
+            st.dataframe(top_delay_reasons[['HoldReason', 'Count', 'Median_HoldingTime', 'Average_HoldingTime', 'Max_HoldingTime', 'Total_Delay_Days']])
+            
+            # Recommendations
+            st.subheader("10c. Recommendations")
+            if not top_delay_reasons.empty:
+                top_reason = top_delay_reasons.iloc[0]
+                st.info(f"🔴 **Highest Impact:** '{top_reason['HoldReason']}' causes an average delay of {top_reason['Average_HoldingTime']:.1f} days across {top_reason['Count']:.0f} cases, totaling {top_reason['Total_Delay_Days']:.1f} delay days.")
+                
+                if len(top_delay_reasons) > 1:
+                    st.warning(f"⚠️ **Top 3 Delay Reasons:** {', '.join(top_delay_reasons.head(3)['HoldReason'].tolist())}")
+        else:
+            st.info("No hold delay data available for analysis")
+    else:
+        st.warning("⚠️ Required columns not found: onHoldReasonDescriptionsHistory or HoldingTimes")
+    
+    # ===================================================================
+    # 11. Hold Seasonality Analysis
+    # ===================================================================
+    st.header("11. Hold Seasonality Analysis")
+    
+    if 'Month_Str' in df.columns and 'TotalHoldingTime' in df.columns:
+        # Cases with holds by month
+        hold_seasonality = df[df['TotalHoldingTime'] > 0].copy()
+        
+        if not hold_seasonality.empty:
+            monthly_holds = hold_seasonality.groupby('Month_Str').agg({
+                'TotalHoldingTime': ['median', 'mean', 'sum', 'count']
+            }).reset_index()
+            monthly_holds.columns = ['Month', 'Median_HoldingTime', 'Average_HoldingTime', 'Total_HoldingTime', 'Cases_With_Holds']
+            
+            total_cases_monthly = df.groupby('Month_Str').size().reset_index(name='Total_Cases')
+            monthly_holds = pd.merge(monthly_holds, total_cases_monthly, left_on='Month', right_on='Month_Str', how='left')
+            monthly_holds['Hold_Percentage'] = (monthly_holds['Cases_With_Holds'] / monthly_holds['Total_Cases'] * 100).round(2)
+            monthly_holds = monthly_holds.sort_values('Month')
+            
+            st.subheader("11a. Hold Frequency by Month")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_hold_freq = px.bar(
+                    monthly_holds,
+                    x='Month',
+                    y='Cases_With_Holds',
+                    title="Number of Cases with Holds by Month",
+                    labels={'Month': 'Month', 'Cases_With_Holds': 'Cases with Holds'},
+                    color='Cases_With_Holds',
+                    color_continuous_scale='Blues'
+                )
+                fig_hold_freq.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hold_freq, use_container_width=True)
+            
+            with col2:
+                fig_hold_pct = px.line(
+                    monthly_holds,
+                    x='Month',
+                    y='Hold_Percentage',
+                    title="Percentage of Cases with Holds by Month",
+                    labels={'Month': 'Month', 'Hold_Percentage': 'Hold Percentage (%)'},
+                    markers=True
+                )
+                fig_hold_pct.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hold_pct, use_container_width=True)
+            
+            st.subheader("11b. Hold Duration Seasonality")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_hold_median = px.line(
+                    monthly_holds,
+                    x='Month',
+                    y='Median_HoldingTime',
+                    title="Median Holding Time by Month",
+                    labels={'Month': 'Month', 'Median_HoldingTime': 'Median Holding Time (Days)'},
+                    markers=True
+                )
+                fig_hold_median.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hold_median, use_container_width=True)
+            
+            with col2:
+                fig_hold_avg = px.line(
+                    monthly_holds,
+                    x='Month',
+                    y='Average_HoldingTime',
+                    title="Average Holding Time by Month",
+                    labels={'Month': 'Month', 'Average_HoldingTime': 'Average Holding Time (Days)'},
+                    markers=True
+                )
+                fig_hold_avg.update_xaxes(tickangle=45)
+                st.plotly_chart(fig_hold_avg, use_container_width=True)
+            
+            st.dataframe(monthly_holds[['Month', 'Total_Cases', 'Cases_With_Holds', 'Hold_Percentage', 'Median_HoldingTime', 'Average_HoldingTime']])
+        else:
+            st.info("No cases with holds found for seasonality analysis")
+    else:
+        st.warning("⚠️ Required columns not found: Month_Str or TotalHoldingTime")
+    
+    # ===================================================================
+    # 12. Hold Buckets Analysis
+    # ===================================================================
+    st.header("12. Hold Buckets Analysis")
+    
+    if 'TotalHoldingTime' in df.columns:
+        # Create hold buckets similar to TAT buckets
+        def categorize_hold_time(hold_time):
+            if pd.isna(hold_time) or hold_time == 0:
+                return "No Hold"
+            elif hold_time <= 5:
+                return "0-5 days"
+            elif hold_time <= 7:
+                return "5-7 days"
+            else:
+                return "7+ days"
+        
+        df['HoldBucket'] = df['TotalHoldingTime'].apply(categorize_hold_time)
+        
+        hold_bucket_counts = df['HoldBucket'].value_counts().reset_index()
+        hold_bucket_counts.columns = ['HoldBucket', 'Count']
+        hold_bucket_counts['Percentage'] = (hold_bucket_counts['Count'] / len(df) * 100).round(2)
+        
+        st.subheader("12a. Distribution of Cases by Hold Buckets")
+        col1, col2 = st.columns(2)
+        with col1:
+            fig_hold_bucket_bar = px.bar(
+                hold_bucket_counts,
+                x='HoldBucket',
+                y='Count',
+                title="Case Count by Hold Bucket",
+                labels={'HoldBucket': 'Hold Bucket', 'Count': 'Number of Cases'},
+                color='Count',
+                color_continuous_scale='Purples'
+            )
+            st.plotly_chart(fig_hold_bucket_bar, use_container_width=True)
+        
+        with col2:
+            fig_hold_bucket_pie = px.pie(
+                hold_bucket_counts,
+                values='Count',
+                names='HoldBucket',
+                title="Hold Bucket Distribution (%)"
+            )
+            st.plotly_chart(fig_hold_bucket_pie, use_container_width=True)
+        
+        st.subheader("12b. Hold Buckets by Month")
+        if 'Month_Str' in df.columns:
+            hold_bucket_monthly = df.groupby(['Month_Str', 'HoldBucket']).size().reset_index(name='Count')
+            hold_bucket_monthly = hold_bucket_monthly.sort_values(['Month_Str', 'HoldBucket'])
+            
+            fig_hold_bucket_monthly = px.bar(
+                hold_bucket_monthly,
+                x='Month_Str',
+                y='Count',
+                color='HoldBucket',
+                title="Hold Bucket Distribution by Month",
+                labels={'Month_Str': 'Month', 'Count': 'Case Count'},
+                barmode='stack',
+                color_discrete_map={
+                    "No Hold": "#90EE90",
+                    "0-5 days": "#FFD700",
+                    "5-7 days": "#FFA500",
+                    "7+ days": "#FF6347"
+                }
+            )
+            fig_hold_bucket_monthly.update_xaxes(tickangle=45)
+            st.plotly_chart(fig_hold_bucket_monthly, use_container_width=True)
+            
+            st.dataframe(hold_bucket_monthly.pivot(index='Month_Str', columns='HoldBucket', values='Count').fillna(0))
+        
+        st.subheader("12c. Hold Bucket Statistics")
+        hold_bucket_stats = df.groupby('HoldBucket').agg({
+            'TotalHoldingTime': ['median', 'mean', 'min', 'max'],
+            'TAT_Days': ['median', 'mean'],
+            'CaseType': 'count'
+        }).reset_index()
+        hold_bucket_stats.columns = ['HoldBucket', 'Median_HoldTime', 'Avg_HoldTime', 'Min_HoldTime', 'Max_HoldTime', 
+                                     'Median_TAT', 'Avg_TAT', 'Case_Count']
+        st.dataframe(hold_bucket_stats)
+    else:
+        st.warning("⚠️ Required column not found: TotalHoldingTime")
+    
+    # ===================================================================
+    # 13. TAT Buckets Analysis (0-5, 5-7, 7+ days)
+    # ===================================================================
+    st.header("13. TAT Buckets Analysis")
+    
+    if 'TAT_Days' in df.columns:
+        # Create TAT buckets
+        def categorize_tat(tat):
+            if pd.isna(tat):
+                return "Not Completed"
+            elif tat <= 5:
+                return "0-5 days"
+            elif tat <= 7:
+                return "5-7 days"
+            else:
+                return "7+ days"
+        
+        df['TAT_Bucket'] = df['TAT_Days'].apply(categorize_tat)
+        
+        tat_bucket_counts = df['TAT_Bucket'].value_counts().reset_index()
+        tat_bucket_counts.columns = ['TAT_Bucket', 'Count']
+        tat_bucket_counts['Percentage'] = (tat_bucket_counts['Count'] / len(df) * 100).round(2)
+        
+        st.subheader("13a. Distribution of Cases by TAT Buckets")
+        col1, col2 = st.columns(2)
+        with col1:
+            fig_tat_bucket_bar = px.bar(
+                tat_bucket_counts,
+                x='TAT_Bucket',
+                y='Count',
+                title="Case Count by TAT Bucket",
+                labels={'TAT_Bucket': 'TAT Bucket', 'Count': 'Number of Cases'},
+                color='Count',
+                color_continuous_scale='Greens'
+            )
+            st.plotly_chart(fig_tat_bucket_bar, use_container_width=True)
+        
+        with col2:
+            fig_tat_bucket_pie = px.pie(
+                tat_bucket_counts,
+                values='Count',
+                names='TAT_Bucket',
+                title="TAT Bucket Distribution (%)"
+            )
+            st.plotly_chart(fig_tat_bucket_pie, use_container_width=True)
+        
+        st.subheader("13b. TAT Buckets by Month")
+        if 'Month_Str' in df.columns:
+            tat_bucket_monthly = df.groupby(['Month_Str', 'TAT_Bucket']).size().reset_index(name='Count')
+            tat_bucket_monthly = tat_bucket_monthly.sort_values(['Month_Str', 'TAT_Bucket'])
+            
+            fig_tat_bucket_monthly = px.bar(
+                tat_bucket_monthly,
+                x='Month_Str',
+                y='Count',
+                color='TAT_Bucket',
+                title="TAT Bucket Distribution by Month",
+                labels={'Month_Str': 'Month', 'Count': 'Case Count'},
+                barmode='stack',
+                color_discrete_map={
+                    "Not Completed": "#D3D3D3",
+                    "0-5 days": "#90EE90",
+                    "5-7 days": "#FFD700",
+                    "7+ days": "#FF6347"
+                }
+            )
+            fig_tat_bucket_monthly.update_xaxes(tickangle=45)
+            st.plotly_chart(fig_tat_bucket_monthly, use_container_width=True)
+            
+            st.dataframe(tat_bucket_monthly.pivot(index='Month_Str', columns='TAT_Bucket', values='Count').fillna(0))
+        
+        st.subheader("13c. TAT Bucket Statistics")
+        tat_bucket_stats = df.groupby('TAT_Bucket').agg({
+            'TAT_Days': ['median', 'mean', 'min', 'max'],
+            'TotalHoldingTime': ['median', 'mean'],
+            'CaseType': 'count'
+        }).reset_index()
+        tat_bucket_stats.columns = ['TAT_Bucket', 'Median_TAT', 'Avg_TAT', 'Min_TAT', 'Max_TAT', 
+                                    'Median_HoldTime', 'Avg_HoldTime', 'Case_Count']
+        st.dataframe(tat_bucket_stats)
+        
+        st.subheader("13d. TAT Buckets vs Hold Buckets")
+        if 'HoldBucket' in df.columns:
+            tat_hold_cross = pd.crosstab(df['TAT_Bucket'], df['HoldBucket'], margins=True)
+            st.dataframe(tat_hold_cross)
+            
+            fig_tat_hold_heatmap = px.density_heatmap(
+                df[df['TAT_Bucket'] != 'Not Completed'],
+                x='HoldBucket',
+                y='TAT_Bucket',
+                title="TAT Buckets vs Hold Buckets Heatmap",
+                labels={'HoldBucket': 'Hold Bucket', 'TAT_Bucket': 'TAT Bucket'}
+            )
+            st.plotly_chart(fig_tat_hold_heatmap, use_container_width=True)
+    else:
+        st.warning("⚠️ Required column not found: TAT_Days")
+    
+    # ===================================================================
+    # 14. Write-Out Reason Description Seasonality (Month-wise)
+    # ===================================================================
+    st.header("14. Write-Out Reason Description Seasonality (Month-wise)")
     
     writeout_col = None
     if 'writeOutReasonDescriptionsHistory' in df.columns:
