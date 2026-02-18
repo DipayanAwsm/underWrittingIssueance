@@ -14,6 +14,13 @@ st.set_page_config(page_title="Auto Issuance Leakage Pointers", layout="wide")
 DEFAULT_FILE = Path("/Users/rituparnapaldas/Downloads/auto_issuance_synthetic_1year_10000rows.csv")
 MISSING_TOKENS = {"", "nan", "none", "null", "na", "n/a", "-", "[]"}
 DATE_TOKEN_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
+TAT_BUCKET_ORDER = ["1-4 days", "5-7 days", "7+ days"]
+TAT_BUCKET_COLORS = {
+    "1-4 days": "#2ca02c",  # green
+    "5-7 days": "#FFBF00",  # amber
+    "7+ days": "#d62728",   # red
+    "Unknown": "#9e9e9e",
+}
 
 
 def normalize_name(name: str) -> str:
@@ -182,6 +189,10 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Dict
     on_hold_col = find_column(df, ["onHoldDatesHistory"])
     off_hold_col = find_column(df, ["offHoldDatesHistory"])
     hold_reason_hist_col = find_column(df, ["onHoldReasonDescriptionsHistory"])
+    writeout_reason_col = find_column(
+        df,
+        ["writeOutReasonDescription", "writeOutReasonDescriptionsHistory", "writeOutDescriptions"],
+    )
     underwriter_col = find_column(df, ["underwriterName", "underwriter"])
     analyst_col = find_column(df, ["accountAnalystName", "accountAnalyst"])
     locations_col = find_column(df, ["numberOfLocations", "numberOfLocations__2"])
@@ -215,6 +226,28 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Dict
         else "Unknown"
     )
     df["request_desc_value"] = df["request_desc_value"].replace("", "Unknown")
+
+    if hold_reason_hist_col is not None:
+        df["on_hold_reason_value"] = df[hold_reason_hist_col].apply(
+            lambda x: short_reason(
+                parse_reason_history_cell(x, expected_count=1)[0]
+                if len(parse_reason_history_cell(x, expected_count=1)) > 0
+                else "No Hold Reason"
+            )
+        )
+    else:
+        df["on_hold_reason_value"] = "No Hold Reason"
+
+    if writeout_reason_col is not None:
+        df["writeout_reason_value"] = df[writeout_reason_col].apply(
+            lambda x: short_reason(
+                parse_reason_history_cell(x, expected_count=1)[0]
+                if len(parse_reason_history_cell(x, expected_count=1)) > 0
+                else "No Write-Out Reason"
+            )
+        )
+    else:
+        df["writeout_reason_value"] = "No Write-Out Reason"
 
     df["underwriter_value"] = (
         df[underwriter_col].fillna("Unassigned").astype(str).str.strip()
@@ -362,6 +395,7 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Dict
         "on_hold_col": on_hold_col,
         "off_hold_col": off_hold_col,
         "hold_reason_hist_col": hold_reason_hist_col,
+        "writeout_reason_col": writeout_reason_col,
         "underwriter_col": underwriter_col,
         "analyst_col": analyst_col,
         "locations_col": locations_col,
@@ -402,6 +436,16 @@ def pct_stats(series: pd.Series) -> Tuple[float, float, float]:
     if s.empty:
         return np.nan, np.nan, np.nan
     return float(s.median()), float(s.quantile(0.5)), float(s.quantile(0.9))
+
+
+def tat_bucket_label(value: float) -> str:
+    if value is None or pd.isna(value):
+        return "Unknown"
+    if value > 7:
+        return "7+ days"
+    if value >= 5:
+        return "5-7 days"
+    return "1-4 days"
 
 
 def owner_summary(segment_df: pd.DataFrame, owner_col: str) -> pd.DataFrame:
@@ -450,7 +494,7 @@ def render_bucket_for_owner(segment_df: pd.DataFrame, owner_col: str, title: str
     tat_counts = (
         owner_df[owner_df["net_tat_days"].notna()]["tat_bucket"]
         .value_counts()
-        .reindex(["1-4 days", "5-7 days", "7+ days"], fill_value=0)
+        .reindex(TAT_BUCKET_ORDER, fill_value=0)
         .rename_axis("bucket")
         .reset_index(name="cases")
     )
@@ -460,9 +504,101 @@ def render_bucket_for_owner(segment_df: pd.DataFrame, owner_col: str, title: str
     fig_hold.update_layout(showlegend=False, xaxis_title="Hold Bucket", yaxis_title="Cases")
     c1.plotly_chart(fig_hold, use_container_width=True)
 
-    fig_tat = px.bar(tat_counts, x="bucket", y="cases", color="bucket", title=f"{selected_owner} - TAT Buckets")
+    fig_tat = px.bar(
+        tat_counts,
+        x="bucket",
+        y="cases",
+        color="bucket",
+        color_discrete_map=TAT_BUCKET_COLORS,
+        category_orders={"bucket": TAT_BUCKET_ORDER},
+        title=f"{selected_owner} - TAT Buckets",
+    )
     fig_tat.update_layout(showlegend=False, xaxis_title="TAT Bucket", yaxis_title="Cases")
     c2.plotly_chart(fig_tat, use_container_width=True)
+
+
+def render_owner_reason_graphs(
+    segment_df: pd.DataFrame,
+    segment_hold_segments: pd.DataFrame,
+    owner_col: str,
+    owner_label: str,
+    key_prefix: str,
+) -> None:
+    if segment_df.empty:
+        st.info(f"No {owner_label.lower()} reason analysis available.")
+        return
+
+    owners = (
+        segment_df.groupby(owner_col, as_index=False)
+        .agg(cases=("request_id", "size"))
+        .sort_values("cases", ascending=False)[owner_col]
+        .tolist()
+    )
+    if not owners:
+        st.info(f"No {owner_label.lower()} values found.")
+        return
+
+    selected_owner = st.selectbox(
+        f"{owner_label} - show most handled reasons",
+        owners,
+        key=f"{key_prefix}_reason_owner",
+    )
+    owner_cases = segment_df[segment_df[owner_col] == selected_owner].copy()
+
+    owner_hold = pd.DataFrame()
+    if not segment_hold_segments.empty:
+        owner_hold = segment_hold_segments[segment_hold_segments[owner_col] == selected_owner].copy()
+
+    if not owner_hold.empty:
+        hold_reason_top = (
+            owner_hold.groupby("hold_reason_short", as_index=False)
+            .agg(hold_events=("hold_days", "size"), total_hold_days=("hold_days", "sum"))
+            .sort_values(["hold_events", "total_hold_days"], ascending=[False, False])
+            .head(10)
+        )
+    else:
+        hold_reason_top = (
+            owner_cases.groupby("on_hold_reason_value", as_index=False)
+            .size()
+            .rename(columns={"size": "hold_events", "on_hold_reason_value": "hold_reason_short"})
+            .sort_values("hold_events", ascending=False)
+            .head(10)
+        )
+        hold_reason_top["total_hold_days"] = np.nan
+
+    writeout_top = (
+        owner_cases.groupby("writeout_reason_value", as_index=False)
+        .size()
+        .rename(columns={"size": "cases"})
+        .sort_values("cases", ascending=False)
+        .head(10)
+    )
+
+    c1, c2 = st.columns(2)
+    if not hold_reason_top.empty:
+        fig_hold_reason = px.bar(
+            hold_reason_top,
+            x="hold_reason_short",
+            y="hold_events",
+            color="total_hold_days" if "total_hold_days" in hold_reason_top.columns else None,
+            title=f"{selected_owner}: Most onHoldReasonDescription handled",
+        )
+        fig_hold_reason.update_layout(xaxis_title="onHoldReasonDescription", yaxis_title="Hold Events")
+        c1.plotly_chart(fig_hold_reason, use_container_width=True)
+    else:
+        c1.info("No onHoldReasonDescription data for this owner.")
+
+    if not writeout_top.empty:
+        fig_writeout = px.bar(
+            writeout_top,
+            x="writeout_reason_value",
+            y="cases",
+            title=f"{selected_owner}: Most writeOutReasonDescription handled",
+        )
+        fig_writeout.update_layout(xaxis_title="writeOutReasonDescription", yaxis_title="Case Count")
+        c2.plotly_chart(fig_writeout, use_container_width=True)
+    else:
+        c2.info("No writeOutReasonDescription data for this owner.")
 
 
 st.title("Leakage Pointers - Auto Insurance Issuance")
@@ -608,24 +744,47 @@ else:
         )
         .sort_values("create_month")
     )
+    monthly_completed["tat_risk"] = monthly_completed["avg_net_tat_days"].apply(tat_bucket_label)
 
-    trend = monthly_completed.melt(
+    c_tat, c_hold = st.columns(2)
+    fig_tat_risk = px.bar(
+        monthly_completed,
+        x="create_month",
+        y="avg_net_tat_days",
+        color="tat_risk",
+        color_discrete_map=TAT_BUCKET_COLORS,
+        category_orders={"tat_risk": TAT_BUCKET_ORDER + ["Unknown"]},
+        title="Completed Cases: Monthly Avg Net TAT (Risk Colored)",
+    )
+    fig_tat_risk.add_hline(y=5, line_dash="dot", line_color=TAT_BUCKET_COLORS["5-7 days"])
+    fig_tat_risk.add_hline(y=7, line_dash="dot", line_color=TAT_BUCKET_COLORS["7+ days"])
+    fig_tat_risk.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)")
+    c_tat.plotly_chart(fig_tat_risk, use_container_width=True)
+
+    hold_trend = monthly_completed.melt(
         id_vars=["create_month"],
-        value_vars=["avg_net_tat_days", "avg_hold_days"],
+        value_vars=["avg_hold_days", "p50_hold_days", "p90_hold_days"],
         var_name="metric",
         value_name="days",
     )
-    trend["metric"] = trend["metric"].map({"avg_net_tat_days": "Avg Net TAT", "avg_hold_days": "Avg Holding Time"})
-    fig_completed_trend = px.line(
-        trend,
+    hold_trend["metric"] = hold_trend["metric"].map(
+        {
+            "avg_hold_days": "Avg Hold",
+            "p50_hold_days": "P50 Hold",
+            "p90_hold_days": "P90 Hold",
+        }
+    )
+    fig_hold_trend = px.line(
+        hold_trend,
         x="create_month",
         y="days",
         color="metric",
         markers=True,
-        title="Completed Cases: Monthly TAT and Holding Time",
+        title="Completed Cases: Monthly Holding Time Trend",
     )
-    fig_completed_trend.update_layout(xaxis_title="Create Month", yaxis_title="Days")
-    st.plotly_chart(fig_completed_trend, use_container_width=True)
+    fig_hold_trend.update_layout(xaxis_title="Create Month", yaxis_title="Days")
+    c_hold.plotly_chart(fig_hold_trend, use_container_width=True)
+
     st.dataframe(monthly_completed, use_container_width=True)
 
 # 3) Non-completed: holding reasons, straight-through and multi-touch
@@ -674,11 +833,24 @@ if not open_cases.empty:
             st.plotly_chart(fig_open_reason, use_container_width=True)
 
 
-def render_segment_analysis(segment_df: pd.DataFrame, title: str, key_prefix: str) -> None:
+def render_segment_analysis(
+    segment_df: pd.DataFrame,
+    segment_hold_segments_source: pd.DataFrame,
+    title: str,
+    key_prefix: str,
+) -> None:
     st.subheader(title)
     if segment_df.empty:
         st.info("No cases in this segment with current filters.")
         return
+
+    segment_request_ids = set(segment_df["request_id"].astype(str))
+    if not segment_hold_segments_source.empty:
+        segment_hold_segments = segment_hold_segments_source[
+            segment_hold_segments_source["request_id"].astype(str).isin(segment_request_ids)
+        ].copy()
+    else:
+        segment_hold_segments = segment_hold_segments_source.copy()
 
     r1, r2, r3 = st.columns(3)
     r1.metric("Cases", f"{len(segment_df):,}")
@@ -705,13 +877,29 @@ def render_segment_analysis(segment_df: pd.DataFrame, title: str, key_prefix: st
     acol.markdown("**Top Analyst Analysis**")
     acol.dataframe(aa_summary.head(15), use_container_width=True)
 
+    st.markdown("**Most handled onHoldReasonDescription and writeOutReasonDescription**")
+    render_owner_reason_graphs(
+        segment_df,
+        segment_hold_segments,
+        "underwriter_value",
+        "Underwriter",
+        f"{key_prefix}_uw",
+    )
+    render_owner_reason_graphs(
+        segment_df,
+        segment_hold_segments,
+        "analyst_value",
+        "Analyst",
+        f"{key_prefix}_aa",
+    )
+
     render_bucket_for_owner(segment_df, "underwriter_value", f"{title} - Underwriter Buckets", f"{key_prefix}_uw")
     render_bucket_for_owner(segment_df, "analyst_value", f"{title} - Analyst Buckets", f"{key_prefix}_aa")
 
 
 # 4) Multi-touch + Multi-hold
-render_segment_analysis(multi_touch_df, "4. MultiTouch Cases", "mt")
-render_segment_analysis(multi_hold_df, "4b. MultiHold Cases", "mh")
+render_segment_analysis(multi_touch_df, hold_segments_filtered, "4. MultiTouch Cases", "mt")
+render_segment_analysis(multi_hold_df, hold_segments_filtered, "4b. MultiHold Cases", "mh")
 
 # Location and number of vehicle analysis
 st.subheader("Location and Number of Vehicle Analysis")
@@ -752,13 +940,29 @@ else:
         heat["location_bucket"] = pd.Categorical(heat["location_bucket"], categories=location_order, ordered=True)
         heat["vehicle_bucket"] = pd.Categorical(heat["vehicle_bucket"], categories=vehicle_order, ordered=True)
         heat = heat.sort_values(["location_bucket", "vehicle_bucket"])
+
+        max_tat_for_scale = float(np.nanmax(heat["avg_tat_days"].values)) if not heat.empty else 7.0
+        cmax = max(7.0, max_tat_for_scale)
+        pos_5 = min(1.0, 5.0 / cmax)
+        pos_7 = min(1.0, 7.0 / cmax)
+        tat_scale = [
+            (0.0, TAT_BUCKET_COLORS["1-4 days"]),
+            (pos_5, TAT_BUCKET_COLORS["1-4 days"]),
+            (pos_5, TAT_BUCKET_COLORS["5-7 days"]),
+            (pos_7, TAT_BUCKET_COLORS["5-7 days"]),
+            (pos_7, TAT_BUCKET_COLORS["7+ days"]),
+            (1.0, TAT_BUCKET_COLORS["7+ days"]),
+        ]
+
         fig_heat = px.density_heatmap(
             heat,
             x="location_bucket",
             y="vehicle_bucket",
             z="avg_tat_days",
             title="Avg Net TAT by Location Bucket and Vehicle Bucket",
-            color_continuous_scale="YlOrRd",
+            color_continuous_scale=tat_scale,
+            zmin=0,
+            zmax=cmax,
         )
         fig_heat.update_layout(xaxis_title="Number of Locations", yaxis_title="Number of Vehicles")
         st.plotly_chart(fig_heat, use_container_width=True)
@@ -940,6 +1144,7 @@ else:
     )
     uw_month = uw_month[uw_month["cases"] >= owner_min_cases]
     uw_month_top = uw_month.sort_values(["create_month", "avg_tat_days"], ascending=[True, False]).drop_duplicates("create_month")
+    uw_month_top["tat_risk"] = uw_month_top["avg_tat_days"].apply(tat_bucket_label)
 
     aa_month = (
         monthly_owner_base.groupby(["create_month", "analyst_value"], as_index=False)
@@ -947,6 +1152,7 @@ else:
     )
     aa_month = aa_month[aa_month["cases"] >= owner_min_cases]
     aa_month_top = aa_month.sort_values(["create_month", "avg_tat_days"], ascending=[True, False]).drop_duplicates("create_month")
+    aa_month_top["tat_risk"] = aa_month_top["avg_tat_days"].apply(tat_bucket_label)
 
     c_uw, c_aa = st.columns(2)
     c_uw.markdown("**Month-wise Highest TAT Underwriter**")
@@ -955,26 +1161,34 @@ else:
     c_aa.dataframe(aa_month_top.sort_values("create_month"), use_container_width=True)
 
     if not uw_month_top.empty:
-        fig_uw_month = px.line(
+        fig_uw_month = px.bar(
             uw_month_top.sort_values("create_month"),
             x="create_month",
             y="avg_tat_days",
-            markers=True,
+            color="tat_risk",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_risk": TAT_BUCKET_ORDER + ["Unknown"]},
             hover_data=["underwriter_value", "cases", "p90_tat_days"],
             title="Monthly Highest Underwriter Avg TAT",
         )
+        fig_uw_month.add_hline(y=5, line_dash="dot", line_color=TAT_BUCKET_COLORS["5-7 days"])
+        fig_uw_month.add_hline(y=7, line_dash="dot", line_color=TAT_BUCKET_COLORS["7+ days"])
         fig_uw_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg TAT Days")
         st.plotly_chart(fig_uw_month, use_container_width=True)
 
     if not aa_month_top.empty:
-        fig_aa_month = px.line(
+        fig_aa_month = px.bar(
             aa_month_top.sort_values("create_month"),
             x="create_month",
             y="avg_tat_days",
-            markers=True,
+            color="tat_risk",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_risk": TAT_BUCKET_ORDER + ["Unknown"]},
             hover_data=["analyst_value", "cases", "p90_tat_days"],
             title="Monthly Highest Analyst Avg TAT",
         )
+        fig_aa_month.add_hline(y=5, line_dash="dot", line_color=TAT_BUCKET_COLORS["5-7 days"])
+        fig_aa_month.add_hline(y=7, line_dash="dot", line_color=TAT_BUCKET_COLORS["7+ days"])
         fig_aa_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg TAT Days")
         st.plotly_chart(fig_aa_month, use_container_width=True)
 
