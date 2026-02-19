@@ -445,6 +445,8 @@ def filter_data(
             segment_mask = segment_mask | out["multi_touch"]
         if "MultiHold" in case_segments:
             segment_mask = segment_mask | out["multi_hold"]
+        if "SingleHold" in case_segments:
+            segment_mask = segment_mask | (out["hold_reason_count"] == 1)
         out = out[segment_mask]
 
     return out
@@ -833,7 +835,7 @@ if df["create_month_dt"].notna().any():
 status_options = sorted(df["status_value"].dropna().unique().tolist())
 selected_statuses = st.sidebar.multiselect("StatusDescription", status_options, default=status_options)
 
-case_segment_options = ["StraightThrough", "MultiTouch", "MultiHold"]
+case_segment_options = ["StraightThrough", "SingleHold", "MultiTouch", "MultiHold"]
 selected_case_segments = st.sidebar.multiselect(
     "Case Segment",
     case_segment_options,
@@ -1029,6 +1031,7 @@ else:
 completed = filtered[filtered["is_completed"]].copy()
 open_cases = filtered[~filtered["is_completed"]].copy()
 straight_through_df = filtered[filtered["straight_through"]].copy()
+single_hold_df = filtered[filtered["hold_reason_count"] == 1].copy()
 multi_touch_df = filtered[filtered["multi_touch"]].copy()
 multi_hold_df = filtered[filtered["multi_hold"]].copy()
 
@@ -1076,6 +1079,107 @@ def render_segment_analysis(
     fig_req = px.bar(req_top, x="request_desc_value", y="case_share_pct", title=f"{title}: Top requestDescription Share")
     fig_req.update_layout(xaxis_title="requestDescription", yaxis_title="Share of Segment (%)")
     st.plotly_chart(fig_req, use_container_width=True)
+
+    st.markdown("**TAT Bucket Analysis**")
+    segment_tat = segment_df[segment_df["net_tat_days"].notna()].copy()
+    if segment_tat.empty:
+        st.info("No valid TAT values available for TAT bucket analysis in this segment.")
+    else:
+        tat_counts = (
+            segment_tat.assign(tat_bucket_value=segment_tat["tat_bucket"].astype("string").fillna("Unknown"))
+            .groupby("tat_bucket_value", as_index=False)
+            .agg(cases=("request_id", "size"))
+        )
+        tat_counts["sort_order"] = tat_counts["tat_bucket_value"].map({b: i for i, b in enumerate(TAT_BUCKET_ORDER + ["Unknown"])})
+        tat_counts["sort_order"] = tat_counts["sort_order"].fillna(99)
+        tat_counts = tat_counts.sort_values("sort_order").drop(columns=["sort_order"])
+        tat_counts["share_pct"] = tat_counts["cases"].apply(lambda x: pct_value(x, len(segment_tat)))
+
+        tat_month = (
+            segment_tat.assign(tat_bucket_value=segment_tat["tat_bucket"].astype("string").fillna("Unknown"))
+            .groupby(["create_month", "tat_bucket_value"], observed=True, as_index=False)
+            .agg(cases=("request_id", "size"))
+            .sort_values("create_month")
+        )
+        tat_month["month_total"] = tat_month.groupby("create_month")["cases"].transform("sum")
+        tat_month["share_pct"] = tat_month.apply(lambda r: pct_value(r["cases"], r["month_total"]), axis=1)
+
+        t1, t2 = st.columns(2)
+        fig_tat_share = px.bar(
+            tat_counts,
+            x="tat_bucket_value",
+            y="share_pct",
+            color="tat_bucket_value",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_bucket_value": TAT_BUCKET_ORDER + ["Unknown"]},
+            title=f"{title}: Overall TAT Bucket Share (%)",
+        )
+        fig_tat_share.update_layout(xaxis_title="TAT Bucket", yaxis_title="Share of Segment (%)")
+        t1.plotly_chart(fig_tat_share, use_container_width=True)
+
+        fig_tat_month = px.bar(
+            tat_month,
+            x="create_month",
+            y="share_pct",
+            color="tat_bucket_value",
+            barmode="stack",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_bucket_value": TAT_BUCKET_ORDER + ["Unknown"]},
+            title=f"{title}: TAT Bucket Mix by Month (%)",
+        )
+        fig_tat_month.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)")
+        t2.plotly_chart(fig_tat_month, use_container_width=True)
+
+        req_tat = (
+            segment_tat.assign(tat_bucket_value=segment_tat["tat_bucket"].astype("string").fillna("Unknown"))
+            .groupby(["request_desc_value", "tat_bucket_value"], observed=True, as_index=False)
+            .agg(cases=("request_id", "size"))
+        )
+        top_req_tat = (
+            req_tat.groupby("request_desc_value", as_index=False)["cases"]
+            .sum()
+            .sort_values("cases", ascending=False)
+            .head(8)["request_desc_value"]
+            .tolist()
+        )
+        req_tat = req_tat[req_tat["request_desc_value"].isin(top_req_tat)].copy()
+        req_tat["request_total"] = req_tat.groupby("request_desc_value")["cases"].transform("sum")
+        req_tat["share_pct"] = req_tat.apply(lambda r: pct_value(r["cases"], r["request_total"]), axis=1)
+        fig_req_tat = px.bar(
+            req_tat,
+            x="request_desc_value",
+            y="share_pct",
+            color="tat_bucket_value",
+            barmode="stack",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_bucket_value": TAT_BUCKET_ORDER + ["Unknown"]},
+            title=f"{title}: requestTypeDescription vs TAT Bucket (%)",
+        )
+        fig_req_tat.update_layout(xaxis_title="requestTypeDescription", yaxis_title="Share within Request Type (%)")
+        st.plotly_chart(fig_req_tat, use_container_width=True)
+
+        hold_tat = (
+            segment_tat.assign(
+                hold_bucket_value=segment_tat["hold_bucket"].astype("string").fillna("Unknown"),
+                tat_bucket_value=segment_tat["tat_bucket"].astype("string").fillna("Unknown"),
+            )
+            .groupby(["hold_bucket_value", "tat_bucket_value"], observed=True, as_index=False)
+            .agg(cases=("request_id", "size"))
+        )
+        hold_tat["hold_total"] = hold_tat.groupby("hold_bucket_value")["cases"].transform("sum")
+        hold_tat["share_pct"] = hold_tat.apply(lambda r: pct_value(r["cases"], r["hold_total"]), axis=1)
+        fig_hold_tat = px.bar(
+            hold_tat,
+            x="hold_bucket_value",
+            y="share_pct",
+            color="tat_bucket_value",
+            barmode="stack",
+            color_discrete_map=TAT_BUCKET_COLORS,
+            category_orders={"tat_bucket_value": TAT_BUCKET_ORDER + ["Unknown"]},
+            title=f"{title}: Hold Bucket vs TAT Bucket (%)",
+        )
+        fig_hold_tat.update_layout(xaxis_title="Hold Bucket", yaxis_title="Share within Hold Bucket (%)")
+        st.plotly_chart(fig_hold_tat, use_container_width=True)
 
     uw_summary = owner_summary(segment_df, "underwriter_value")
     aa_summary = owner_summary(segment_df, "analyst_value")
@@ -1703,6 +1807,7 @@ with tab_straight:
         fig_st_request.update_layout(xaxis_title="requestTypeDescription", yaxis_title="Share of StraightThrough (%)")
         st.plotly_chart(fig_st_request, use_container_width=True)
 
+    render_segment_analysis(single_hold_df, hold_segments_filtered, "SingleHold Cases", "sh", len(filtered))
     render_segment_analysis(multi_touch_df, hold_segments_filtered, "MultiTouch Cases", "mt", len(filtered))
 
 with tab_multi_hold:
@@ -1724,6 +1829,7 @@ with tab_people:
             "Completed Cases",
             "Open Cases",
             "StraightThrough Cases",
+            "SingleHold Cases",
             "MultiTouch Cases",
             "MultiHold Cases",
         ],
@@ -1737,6 +1843,8 @@ with tab_people:
         people_df = open_cases
     elif people_scope == "StraightThrough Cases":
         people_df = straight_through_df
+    elif people_scope == "SingleHold Cases":
+        people_df = single_hold_df
     elif people_scope == "MultiTouch Cases":
         people_df = multi_touch_df
     else:
@@ -2148,6 +2256,7 @@ with tab_holding:
         "All Cases": filtered,
         "Completed Cases": completed,
         "Non-Completed Cases": open_cases,
+        "SingleHold Cases": single_hold_df,
         "MultiTouch Cases": multi_touch_df,
         "MultiHold Cases": multi_hold_df,
     }
@@ -2243,5 +2352,5 @@ with tab_holding:
 
 st.caption(
     "Definitions: Completed = completedDateTime present; Net TAT = completedDateTime - createDateTime - total holding time; "
-    "MultiTouch = touches_count > 1; MultiHold = hold_reason_count >= 2."
+    "SingleHold = hold_reason_count = 1; MultiTouch = touches_count > 1; MultiHold = hold_reason_count >= 2."
 )
