@@ -205,6 +205,10 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
     request_type_col = find_column(df, ["requestTypeDescription", "requestTypeCode", "requestType"])
     bgi_desc_col = find_column(df, ["bgiDescription", "bgi_description"])
     lob_desc_col = find_column(df, ["lineOfBusinessDescription", "line_of_business_description"])
+    underwriting_segment_col = find_column(
+        df,
+        ["underwritingSegmentDescription", "underwriting_segment_description"],
+    )
     underwriter_col = find_column(df, ["underwriterName", "underwriter", "underwriter_name"])
     agent_broker_col = find_column(df, ["AgentBrokerName", "agentBrokerName", "AgentBrokerName__2"])
     account_analyst_col = find_column(df, ["accountAnalystName", "accountAnalyst", "account_analyst_name"])
@@ -244,6 +248,12 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         df["lob_desc_value"] = df[lob_desc_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     else:
         df["lob_desc_value"] = "Unknown"
+    if underwriting_segment_col is not None:
+        df["underwriting_segment_value"] = (
+            df[underwriting_segment_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+        )
+    else:
+        df["underwriting_segment_value"] = "Unknown"
     if underwriter_col is not None:
         df["underwriter_value"] = df[underwriter_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     else:
@@ -323,6 +333,7 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         "request_type_col": request_type_col,
         "bgi_desc_col": bgi_desc_col,
         "lob_desc_col": lob_desc_col,
+        "underwriting_segment_col": underwriting_segment_col,
         "underwriter_col": underwriter_col,
         "agent_broker_col": agent_broker_col,
         "account_analyst_col": account_analyst_col,
@@ -376,6 +387,39 @@ def explode_hold_reasons(source_df: pd.DataFrame, hold_reason_col: Optional[str]
     return pd.DataFrame(rows)
 
 
+def add_bar_labels(
+    fig: object,
+    orientation: str = "v",
+    value_type: str = "percent",
+    use_text_field: bool = False,
+    text_as_percent: bool = False,
+) -> None:
+    if use_text_field:
+        text_template = "%{text:.1f}%" if text_as_percent else "%{text:,.0f}"
+    elif orientation == "h":
+        if value_type == "percent":
+            text_template = "%{x:.1f}%"
+        elif value_type == "days":
+            text_template = "%{x:.2f}"
+        else:
+            text_template = "%{x:,.0f}"
+    else:
+        if value_type == "percent":
+            text_template = "%{y:.1f}%"
+        elif value_type == "days":
+            text_template = "%{y:.2f}"
+        else:
+            text_template = "%{y:,.0f}"
+
+    fig.update_traces(
+        texttemplate=text_template,
+        textposition="inside",
+        insidetextanchor="middle",
+        cliponaxis=False,
+    )
+    fig.update_layout(uniformtext_minsize=8, uniformtext_mode="hide")
+
+
 def make_bucket_bar(
     counts_df: pd.DataFrame,
     bucket_col: str,
@@ -395,14 +439,13 @@ def make_bucket_bar(
         counts_df,
         x=bucket_col,
         y="share_pct",
+        text=count_col,
         color=bucket_col,
         color_discrete_map=color_map,
         category_orders={bucket_col: category_order} if category_order else None,
         title=title,
     )
     fig.update_traces(
-        text=counts_df["share_pct"].apply(lambda v: f"{v:.1f}%"),
-        textposition="outside",
         customdata=np.stack([counts_df[count_col]], axis=-1),
         hovertemplate=(
             "<b>%{x}</b><br>"
@@ -410,7 +453,8 @@ def make_bucket_bar(
             "Share: %{y:.2f}%<extra></extra>"
         ),
     )
-    fig.update_layout(xaxis_title="Bucket", yaxis_title="Share (%)")
+    add_bar_labels(fig, orientation="v", value_type="count", use_text_field=True)
+    fig.update_layout(xaxis_title="Bucket", yaxis_title="Share (%)", showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -447,6 +491,7 @@ def make_bucket_month_bar(
         month_counts,
         x="create_month",
         y="share_pct",
+        text="share_pct",
         color="bucket_value",
         barmode="stack",
         color_discrete_map=color_map,
@@ -454,6 +499,7 @@ def make_bucket_month_bar(
         title=title,
         hover_data={"cases": ":,.0f", "month_total": ":,.0f", "share_pct": ":.2f"},
     )
+    add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
     fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -529,7 +575,7 @@ multi_hold_df = filtered[filtered["hold_reason_count"] >= 1].copy()
 multi_hold_completed_df = multi_hold_df[multi_hold_df["is_completed"]].copy()
 multi_hold_open_df = multi_hold_df[~multi_hold_df["is_completed"]].copy()
 
-tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market = st.tabs(
+tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson = st.tabs(
     [
         "Data Explorer",
         "Cycle Time Summary",
@@ -537,6 +583,7 @@ tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market = st.tabs(
         "Straight Through Cases",
         "Agent Broker Summary",
         "Market Analysis",
+        "reson",
     ]
 )
 
@@ -575,27 +622,9 @@ with tab_cycle:
 
     st.markdown("---")
     st.subheader("2) Completed Cases")
-    c_left, c_right = st.columns(2)
     completed_tat = completed_df[completed_df["net_tat_days"].notna()].copy()
-    with c_left:
-        tat_counts = (
-            completed_tat["tat_bucket"]
-            .astype("string")
-            .value_counts()
-            .reindex(TAT_BUCKET_ORDER, fill_value=0)
-            .rename_axis("bucket")
-            .reset_index(name="count")
-        )
-        make_bucket_bar(
-            tat_counts,
-            bucket_col="bucket",
-            count_col="count",
-            color_map=TAT_BUCKET_COLORS,
-            title="Completed Cases - TAT Bucket (%)",
-            category_order=TAT_BUCKET_ORDER,
-        )
-
-    with c_right:
+    c2_left, c2_right = st.columns(2)
+    with c2_left:
         completion_month = month_rate(completed_df, filtered, "completion")
         tat_gt7_month = (
             completed_df[completed_df["create_month"].notna() & (completed_df["create_month"] != "NaT")]
@@ -636,19 +665,18 @@ with tab_cycle:
         )
         fig_completion.update_layout(xaxis_title="Create Month", yaxis_title="Percent (%)")
         st.plotly_chart(fig_completion, use_container_width=True)
-
-    make_bucket_month_bar(
-        completed_tat,
-        bucket_col="tat_bucket",
-        title="Completed Cases - TAT Bucket by Month (%)",
-        color_map=TAT_BUCKET_COLORS,
-        category_order=TAT_BUCKET_ORDER,
-    )
+    with c2_right:
+        make_bucket_month_bar(
+            completed_tat,
+            bucket_col="tat_bucket",
+            title="Completed Cases - TAT Bucket by Month (%)",
+            color_map=TAT_BUCKET_COLORS,
+            category_order=TAT_BUCKET_ORDER,
+        )
 
     st.markdown("---")
     st.subheader("3) Open Cases")
     o1, o2 = st.columns(2)
-    open_bucket_source = open_df[open_df["open_days"].notna()].copy()
     with o1:
         st.metric("Open % Cases", pct_text(len(open_df), total_cases))
         open_month = month_rate(open_df, filtered, "open")
@@ -668,30 +696,6 @@ with tab_cycle:
             "Average Open Days",
             f"{open_df['open_days'].mean():.2f} days" if not open_df.empty else "NA",
         )
-        open_bucket_counts = (
-            open_df["open_days_bucket"]
-            .astype("string")
-            .value_counts()
-            .reindex(OPEN_BUCKET_ORDER, fill_value=0)
-            .rename_axis("bucket")
-            .reset_index(name="count")
-        )
-        make_bucket_bar(
-            open_bucket_counts,
-            bucket_col="bucket",
-            count_col="count",
-            color_map=OPEN_BUCKET_COLORS,
-            title="Open Cases - Days Open Bucket (%)",
-            category_order=OPEN_BUCKET_ORDER,
-        )
-
-    make_bucket_month_bar(
-        open_bucket_source,
-        bucket_col="open_days_bucket",
-        title="Open Cases - Open Days Bucket by Month (%)",
-        color_map=OPEN_BUCKET_COLORS,
-        category_order=OPEN_BUCKET_ORDER,
-    )
 
     st.markdown("---")
     st.subheader("4) StraightThrough Cases")
@@ -889,11 +893,13 @@ with tab_multi:
                     reason_month_dist,
                     x="create_month",
                     y="share_pct",
+                    text="share_pct",
                     color="reason_plot",
                     barmode="stack",
                     title="Top Hold Reasons - Month-wise Distribution (Multi Hold)",
                     hover_data={"events": ":,.0f", "month_total": ":,.0f", "share_pct": ":.2f"},
                 )
+                add_bar_labels(fig_reason_dist, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_reason_dist.update_layout(xaxis_title="Create Month", yaxis_title="Share of Hold Events (%)", legend_title="Hold Reason")
                 st.plotly_chart(fig_reason_dist, use_container_width=True)
 
@@ -922,11 +928,13 @@ with tab_multi:
                     handler_month_mix,
                     x="create_month",
                     y="share_pct",
+                    text="share_pct",
                     color="handler",
                     barmode="stack",
                     title=f"{role_choice} - Month-wise Share in Multi Hold Cases",
                     hover_data={"cases": ":,.0f", "month_total": ":,.0f", "share_pct": ":.2f"},
                 )
+                add_bar_labels(fig_handlers, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_handlers.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=role_choice)
                 st.plotly_chart(fig_handlers, use_container_width=True)
 
@@ -972,6 +980,7 @@ with tab_multi:
                     month_mix,
                     x="create_month",
                     y="share_pct",
+                    text="share_pct",
                     color="plot_value",
                     barmode="stack",
                     category_orders={"plot_value": category_order},
@@ -979,6 +988,7 @@ with tab_multi:
                     hover_data={"cases": ":,.0f", "month_total": ":,.0f", "share_pct": ":.2f"},
                     color_discrete_sequence=color_seq,
                 )
+                add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=value_label)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1051,11 +1061,13 @@ with tab_multi:
                     reason_mix,
                     x="create_month",
                     y="share_pct",
+                    text="share_pct",
                     color="reason_plot",
                     barmode="stack",
                     title="Month-wise Hold Reason Mix (Multi Hold)",
                     hover_data={"events": ":,.0f", "month_total_events": ":,.0f", "share_pct": ":.2f"},
                 )
+                add_bar_labels(fig_reason, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_reason.update_layout(xaxis_title="Create Month", yaxis_title="Share of Hold Reason Events (%)", legend_title="Hold Reason")
                 st.plotly_chart(fig_reason, use_container_width=True)
 
@@ -1184,6 +1196,7 @@ with tab_agent:
                 hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
                 color_discrete_sequence=[color_code],
             )
+            add_bar_labels(fig, orientation="h", value_type="percent")
             fig.update_layout(xaxis_title="Share (%)", yaxis_title=y_label.replace("_", " ").title())
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1422,6 +1435,7 @@ with tab_agent:
                 },
                 title="Month-wise Highest Avg TAT (Analyst vs Broker)",
             )
+            add_bar_labels(fig_leaders, orientation="v", value_type="days")
             fig_leaders.update_layout(xaxis_title="Create Month", yaxis_title="Highest Avg Net TAT (days)")
             st.plotly_chart(fig_leaders, use_container_width=True)
 
@@ -1504,6 +1518,7 @@ with tab_agent:
                         hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
                         color_discrete_sequence=["#9467bd"],
                     )
+                    add_bar_labels(fig_hold_analyst, orientation="h", value_type="percent")
                     fig_hold_analyst.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
                     st.plotly_chart(fig_hold_analyst, use_container_width=True)
             with a3:
@@ -1581,6 +1596,7 @@ with tab_agent:
                         hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
                         color_discrete_sequence=["#ff7f0e"],
                     )
+                    add_bar_labels(fig_hold_broker, orientation="h", value_type="percent")
                     fig_hold_broker.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
                     st.plotly_chart(fig_hold_broker, use_container_width=True)
             with b3:
@@ -1645,6 +1661,7 @@ with tab_straight:
                 month_mix,
                 x="create_month",
                 y="share_pct",
+                text="share_pct",
                 color="plot_value",
                 barmode="stack",
                 category_orders={"plot_value": category_order},
@@ -1652,6 +1669,7 @@ with tab_straight:
                 hover_data={"cases": ":,.0f", "month_total": ":,.0f", "share_pct": ":.2f"},
                 color_discrete_sequence=color_seq,
             )
+            add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
             fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=value_label)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1753,11 +1771,13 @@ with tab_market:
                     bgi_month_mix,
                     x="create_month",
                     y="pct_overall",
+                    text="pct_overall",
                     color="bgi_plot",
                     barmode="stack",
                     title="BGI Description - Month-wise % of Overall Cases",
                     hover_data={"cases": ":,.0f", "pct_overall": ":.2f"},
                 )
+                add_bar_labels(fig_bgi_overall, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_bgi_overall.update_layout(xaxis_title="Create Month", yaxis_title="% of Overall Cases", legend_title="BGI Description")
                 st.plotly_chart(fig_bgi_overall, use_container_width=True)
 
@@ -1784,6 +1804,7 @@ with tab_market:
             title="Average Net TAT by BGI Description (Top 15 by Avg TAT)",
             hover_data={"cases": ":,.0f", "share_pct": ":.2f", "p90_tat_days": ":.2f", "avg_tat_days": ":.2f"},
         )
+        add_bar_labels(fig_bgi_avg, orientation="h", value_type="days")
         fig_bgi_avg.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="BGI Description")
         st.plotly_chart(fig_bgi_avg, use_container_width=True)
 
@@ -1800,6 +1821,87 @@ with tab_market:
             use_container_width=True,
         )
 
+with tab_reson:
+    st.subheader("reson")
+    st.caption("High TAT view (Net TAT > 4 days): average TAT and percent share by requested dimensions.")
+
+    reson_base = completed_df[completed_df["net_tat_days"] > 4].copy()
+    reson_base["request_type_value"] = reson_base["request_type_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+    reson_base["bgi_desc_value"] = reson_base["bgi_desc_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+    reson_base["underwriting_segment_value"] = (
+        reson_base["underwriting_segment_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+    )
+    reson_base["agent_broker_value"] = reson_base["agent_broker_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+
+    if reson_base.empty:
+        st.info("No completed cases with Net TAT > 4 days available for reson analysis.")
+    else:
+        def build_reson_summary(source_df: pd.DataFrame, dim_col: str) -> pd.DataFrame:
+            out = (
+                source_df.groupby(dim_col, as_index=False)
+                .agg(
+                    cases=("request_id", "size"),
+                    avg_tat_days=("net_tat_days", "mean"),
+                )
+                .rename(columns={dim_col: "data_point"})
+                .sort_values(["avg_tat_days", "cases"], ascending=[False, False])
+            )
+            out["share_pct"] = out["cases"].apply(lambda x: pct_value(x, len(source_df)))
+            return out
+
+        def draw_reson_chart(title: str, dim_col: str, y_label: str) -> None:
+            st.markdown(title)
+            summary = build_reson_summary(reson_base, dim_col)
+            if summary.empty:
+                st.info("No data points available.")
+                return
+
+            c1, c2 = st.columns([1.15, 1.0])
+            with c1:
+                fig = px.bar(
+                    summary.sort_values("avg_tat_days", ascending=True),
+                    x="avg_tat_days",
+                    y="data_point",
+                    orientation="h",
+                    text="share_pct",
+                    color="share_pct",
+                    color_continuous_scale="YlOrRd",
+                    title=f"{y_label}: Avg TAT and % share",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f", "avg_tat_days": ":.2f"},
+                )
+                fig.update_traces(texttemplate="%{text:.1f}%", textposition="inside")
+                fig.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title=y_label)
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                st.dataframe(
+                    summary[["data_point", "cases", "share_pct", "avg_tat_days"]].style.format(
+                        {"cases": "{:,.0f}", "share_pct": "{:.2f}%", "avg_tat_days": "{:.2f}"},
+                        na_rep="NA",
+                    ),
+                    use_container_width=True,
+                )
+
+        draw_reson_chart(
+            "### 1) Based on requestTypeDescription and average_TAT",
+            dim_col="request_type_value",
+            y_label="Request Type",
+        )
+        draw_reson_chart(
+            "### 2) Based on bgiDescription and average_TAT",
+            dim_col="bgi_desc_value",
+            y_label="BGI Description",
+        )
+        draw_reson_chart(
+            "### 3) Based on underwritingSegmentDescription and average_TAT",
+            dim_col="underwriting_segment_value",
+            y_label="Underwriting Segment",
+        )
+        draw_reson_chart(
+            "### 4) Based on agent broker and average_TAT",
+            dim_col="agent_broker_value",
+            y_label="Agent Broker",
+        )
+
 with tab_data:
     st.subheader("Data Explorer")
     st.write(f"Rows in current filtered view: **{len(filtered):,}**")
@@ -1814,6 +1916,7 @@ with tab_data:
         ("request_type_value", "categorical"),
         ("bgi_desc_value", "categorical"),
         ("lob_desc_value", "categorical"),
+        ("underwriting_segment_value", "categorical"),
         ("underwriter_value", "categorical"),
         ("account_analyst_value", "categorical"),
         ("agent_broker_value", "categorical"),
@@ -1898,6 +2001,7 @@ with tab_data:
         "request_type_value",
         "bgi_desc_value",
         "lob_desc_value",
+        "underwriting_segment_value",
         "underwriter_value",
         "account_analyst_value",
         "agent_broker_value",
