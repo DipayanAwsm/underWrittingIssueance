@@ -583,7 +583,7 @@ tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson =
         "Straight Through Cases",
         "Agent Broker Summary",
         "Market Analysis",
-        "reson",
+        "Reason",
     ]
 )
 
@@ -1822,10 +1822,10 @@ with tab_market:
         )
 
 with tab_reson:
-    st.subheader("reson")
-    st.caption("High TAT view (Net TAT > 4 days): average TAT and percent share by requested dimensions.")
+    st.subheader("Reason")
+    st.caption("High TAT view (Net TAT > 7 days): Top 5 by dimension with average TAT and percent share.")
 
-    reson_base = completed_df[completed_df["net_tat_days"] > 4].copy()
+    reson_base = completed_df[completed_df["net_tat_days"] > 7].copy()
     reson_base["request_type_value"] = reson_base["request_type_value"].astype("string").fillna("Unknown").replace("", "Unknown")
     reson_base["bgi_desc_value"] = reson_base["bgi_desc_value"].astype("string").fillna("Unknown").replace("", "Unknown")
     reson_base["underwriting_segment_value"] = (
@@ -1834,7 +1834,7 @@ with tab_reson:
     reson_base["agent_broker_value"] = reson_base["agent_broker_value"].astype("string").fillna("Unknown").replace("", "Unknown")
 
     if reson_base.empty:
-        st.info("No completed cases with Net TAT > 4 days available for reson analysis.")
+        st.info("No completed cases with Net TAT > 7 days available for Reason analysis.")
     else:
         def build_reson_summary(source_df: pd.DataFrame, dim_col: str) -> pd.DataFrame:
             out = (
@@ -1844,10 +1844,10 @@ with tab_reson:
                     avg_tat_days=("net_tat_days", "mean"),
                 )
                 .rename(columns={dim_col: "data_point"})
-                .sort_values(["avg_tat_days", "cases"], ascending=[False, False])
+                .sort_values(["cases", "avg_tat_days"], ascending=[False, False])
             )
             out["share_pct"] = out["cases"].apply(lambda x: pct_value(x, len(source_df)))
-            return out
+            return out.head(5)
 
         def draw_reson_chart(title: str, dim_col: str, y_label: str) -> None:
             st.markdown(title)
@@ -1866,7 +1866,7 @@ with tab_reson:
                     text="share_pct",
                     color="share_pct",
                     color_continuous_scale="YlOrRd",
-                    title=f"{y_label}: Avg TAT and % share",
+                    title=f"{y_label}: Top 5 (TAT > 7 days) Avg TAT and % share",
                     hover_data={"cases": ":,.0f", "share_pct": ":.2f", "avg_tat_days": ":.2f"},
                 )
                 fig.update_traces(texttemplate="%{text:.1f}%", textposition="inside")
