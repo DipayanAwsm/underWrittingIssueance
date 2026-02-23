@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 
@@ -212,6 +213,15 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
     underwriter_col = find_column(df, ["underwriterName", "underwriter", "underwriter_name"])
     agent_broker_col = find_column(df, ["AgentBrokerName", "agentBrokerName", "AgentBrokerName__2"])
     account_analyst_col = find_column(df, ["accountAnalystName", "accountAnalyst", "account_analyst_name"])
+    write_out_reason_col = find_column(
+        df,
+        [
+            "writeOutReasonDescriptionsHistory",
+            "writeOutReasonDescription",
+            "writeOutReasonDescriptions",
+            "writeOutDescriptions",
+        ],
+    )
     on_hold_col = find_column(df, ["onHoldDatesHistory"])
     off_hold_col = find_column(df, ["offHoldDatesHistory"])
     hold_reason_col = find_column(df, ["onHoldReasonDescriptionsHistory"])
@@ -266,6 +276,12 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         df["account_analyst_value"] = df[account_analyst_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     else:
         df["account_analyst_value"] = "Unknown"
+    if write_out_reason_col is not None:
+        df["write_out_reason_value"] = (
+            df[write_out_reason_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+        )
+    else:
+        df["write_out_reason_value"] = "Unknown"
 
     if create_col is not None:
         df["create_month_dt"] = df["create_dt"].dt.to_period("M").dt.to_timestamp()
@@ -337,6 +353,7 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         "underwriter_col": underwriter_col,
         "agent_broker_col": agent_broker_col,
         "account_analyst_col": account_analyst_col,
+        "write_out_reason_col": write_out_reason_col,
         "on_hold_col": on_hold_col,
         "off_hold_col": off_hold_col,
         "hold_reason_col": hold_reason_col,
@@ -420,6 +437,17 @@ def add_bar_labels(
     fig.update_layout(uniformtext_minsize=8, uniformtext_mode="hide")
 
 
+_plotly_chart_counter = 0
+
+
+def render_plotly_chart(fig: object, **kwargs) -> None:
+    global _plotly_chart_counter
+    if "key" not in kwargs or kwargs["key"] is None:
+        _plotly_chart_counter += 1
+        kwargs["key"] = f"plotly_{_plotly_chart_counter}"
+    st.plotly_chart(fig, **kwargs)
+
+
 def make_bucket_bar(
     counts_df: pd.DataFrame,
     bucket_col: str,
@@ -455,7 +483,7 @@ def make_bucket_bar(
     )
     add_bar_labels(fig, orientation="v", value_type="count", use_text_field=True)
     fig.update_layout(xaxis_title="Bucket", yaxis_title="Share (%)", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    render_plotly_chart(fig, use_container_width=True)
 
 
 def make_bucket_month_bar(
@@ -501,7 +529,7 @@ def make_bucket_month_bar(
     )
     add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
     fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)")
-    st.plotly_chart(fig, use_container_width=True)
+    render_plotly_chart(fig, use_container_width=True)
 
 
 st.title("Auto Issuance Speed to Market – Business Intelligence Prescriptive")
@@ -589,124 +617,192 @@ tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson =
 
 with tab_cycle:
     st.subheader("1) Overall Snapshot")
-    left, right = st.columns([1.2, 1.0])
-    with left:
-        a1, a2 = st.columns(2)
-        a1.metric("Total Number of Cases", f"{total_cases:,}")
-        a2.metric("Completed % Cases", pct_text(len(completed_df), total_cases))
-        a3, a4 = st.columns(2)
-        a3.metric("StraightThrough % Cases", pct_text(len(straight_df), total_cases))
-        a4.metric("Open % Cases", pct_text(len(open_df), total_cases))
-
-    with right:
-        mix_df = pd.DataFrame(
-            {
-                "segment": [
-                    "Completed + StraightThrough",
-                    "Completed + Non-StraightThrough",
-                    "Open + StraightThrough",
-                    "Open + Non-StraightThrough",
-                ],
-                "cases": [
-                    int(((filtered["is_completed"]) & (filtered["straight_through"])).sum()),
-                    int(((filtered["is_completed"]) & (~filtered["straight_through"])).sum()),
-                    int(((~filtered["is_completed"]) & (filtered["straight_through"])).sum()),
-                    int(((~filtered["is_completed"]) & (~filtered["straight_through"])).sum()),
-                ],
-            }
-        )
-        mix_df = mix_df[mix_df["cases"] > 0]
-        fig_mix = px.pie(mix_df, names="segment", values="cases", title="Overall Case Mix")
-        fig_mix.update_traces(hovertemplate="<b>%{label}</b><br>Count: %{value:,}<br>Share: %{percent}<extra></extra>")
-        st.plotly_chart(fig_mix, use_container_width=True)
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("Total Number of Cases", f"{total_cases:,}")
+    a2.metric("Completed % Cases", pct_text(len(completed_df), total_cases))
+    a3.metric("StraightThrough % Cases", pct_text(len(straight_df), total_cases))
+    a4.metric("Multi Hold % Cases", pct_text(len(multi_hold_df), total_cases))
+    a5.metric("Open % Cases", pct_text(len(open_df), total_cases))
 
     st.markdown("---")
     st.subheader("2) Completed Cases")
     completed_tat = completed_df[completed_df["net_tat_days"].notna()].copy()
+    if not completed_tat.empty:
+        p50_all = completed_tat["net_tat_days"].quantile(0.5)
+        p90_all = completed_tat["net_tat_days"].quantile(0.9)
     c2_left, c2_right = st.columns(2)
     with c2_left:
-        completion_month = month_rate(completed_df, filtered, "completion")
-        tat_gt7_month = (
-            completed_df[completed_df["create_month"].notna() & (completed_df["create_month"] != "NaT")]
-            .groupby("create_month", as_index=False)
-            .agg(
-                completed_with_valid_tat=("net_tat_days", lambda s: s.notna().sum()),
-                tat_over_7_cases=("net_tat_days", lambda s: (pd.to_numeric(s, errors="coerce") > 7).sum()),
+        if completed_tat.empty:
+            st.info("No completed cases with valid TAT for bucket chart.")
+        else:
+            st.metric("Median Days of Issuance (P50)", f"{p50_all:.2f} days")
+            make_bucket_month_bar(
+                completed_tat,
+                bucket_col="tat_bucket",
+                color_map=TAT_BUCKET_COLORS,
+                title="Completed Cases - TAT Bucket by Month (%)",
+                category_order=TAT_BUCKET_ORDER,
             )
-        )
-        tat_gt7_month["tat_over_7_pct"] = tat_gt7_month.apply(
-            lambda r: pct_value(r["tat_over_7_cases"], r["completed_with_valid_tat"]),
-            axis=1,
-        )
-        completion_month = completion_month.merge(
-            tat_gt7_month[["create_month", "tat_over_7_pct"]],
-            on="create_month",
-            how="left",
-        )
-        completion_plot = completion_month.melt(
-            id_vars=["create_month"],
-            value_vars=["pct", "tat_over_7_pct"],
-            var_name="metric",
-            value_name="percent_value",
-        )
-        completion_plot["metric"] = completion_plot["metric"].map(
-            {
-                "pct": "Completed %",
-                "tat_over_7_pct": "TAT > 7 days % (Completed)",
-            }
-        )
-        fig_completion = px.line(
-            completion_plot,
-            x="create_month",
-            y="percent_value",
-            color="metric",
-            markers=True,
-            title="Completed % by Create Month + % TAT > 7 Days",
-        )
-        fig_completion.update_layout(xaxis_title="Create Month", yaxis_title="Percent (%)")
-        st.plotly_chart(fig_completion, use_container_width=True)
     with c2_right:
         if completed_tat.empty:
             st.info("No completed cases with valid issuance days for percentile trend.")
         else:
-            p50_all = completed_tat["net_tat_days"].quantile(0.5)
-            p90_all = completed_tat["net_tat_days"].quantile(0.9)
-            p2a, p2b = st.columns(2)
-            p2a.metric("Median Days of Issuance (P50)", f"{p50_all:.2f} days")
-            p2b.metric("Days of Issuance Excluding Outliers (P90)", f"{p90_all:.2f} days")
-            make_bucket_month_bar(
-                completed_tat,
-                bucket_col="tat_bucket",
-                title=f"Completed Cases - TAT Bucket by Month (%) | P50: {p50_all:.2f}d, P90: {p90_all:.2f}d",
-                color_map=TAT_BUCKET_COLORS,
-                category_order=TAT_BUCKET_ORDER,
+            st.metric("Days of Issuance Excluding Outliers (P90)", f"{p90_all:.2f} days")
+
+            p_month = (
+                completed_tat[completed_tat["create_month"].notna() & (completed_tat["create_month"] != "NaT")]
+                .groupby("create_month", as_index=False)
+                .agg(
+                    p50_days=("net_tat_days", lambda s: s.quantile(0.5)),
+                    p90_days=("net_tat_days", lambda s: s.quantile(0.9)),
+                    cases=("request_id", "size"),
+                )
+                .sort_values("create_month")
             )
+            p_month_long = p_month.melt(
+                id_vars=["create_month", "cases"],
+                value_vars=["p50_days", "p90_days"],
+                var_name="metric",
+                value_name="days",
+            )
+            p_month_long["metric"] = p_month_long["metric"].map(
+                {"p50_days": "Median Days (P50)", "p90_days": "P90 Days"}
+            )
+            fig_p = px.line(
+                p_month_long,
+                x="create_month",
+                y="days",
+                color="metric",
+                markers=True,
+                title="Completed Cases - Month-wise P50 and P90",
+                hover_data={"cases": ":,.0f", "days": ":.2f"},
+            )
+            fig_p.update_layout(xaxis_title="Create Month", yaxis_title="Issuance Days")
+            render_plotly_chart(fig_p, use_container_width=True)
 
     st.markdown("---")
     st.subheader("3) Open Cases")
-    o1, o2 = st.columns(2)
-    with o1:
-        st.metric("Open % Cases", pct_text(len(open_df), total_cases))
-        open_month = month_rate(open_df, filtered, "open")
-        fig_open = px.line(
-            open_month,
-            x="create_month",
-            y="pct",
-            markers=True,
-            hover_data={"cases": ":,.0f", "total_cases": ":,.0f", "pct": ":.2f"},
-            title="Open % by Create Month",
-        )
-        fig_open.update_layout(xaxis_title="Create Month", yaxis_title="Open %")
-        st.plotly_chart(fig_open, use_container_width=True)
+    open_work = open_df.copy()
+    open_work["case_type"] = np.where(open_work["hold_reason_count"] >= 1, "Multi Hold", "Straight Through")
+    open_work["touches"] = open_work["hold_reason_count"].fillna(0).astype(float) + 1.0
+    case_type_order = ["Straight Through", "Multi Hold"]
+    case_type_colors = {"Straight Through": "#2ca02c", "Multi Hold": "#d62728"}
+    if open_work.empty:
+        st.info("No open cases available for straight-through vs multi-hold split.")
+    else:
+        straight_median_tat = completed_straight_df["net_tat_days"].median() if not completed_straight_df.empty else np.nan
+        multi_tat_source = multi_hold_completed_df[multi_hold_completed_df["net_tat_days"].notna()].copy()
+        multi_median_tat = multi_tat_source["net_tat_days"].median() if not multi_tat_source.empty else np.nan
 
-    with o2:
-        st.metric(
-            "Average Open Days",
-            f"{open_df['open_days'].mean():.2f} days" if not open_df.empty else "NA",
+        split_counts = (
+            open_work["case_type"]
+            .value_counts()
+            .reindex(case_type_order, fill_value=0)
+            .rename_axis("case_type")
+            .reset_index(name="cases")
         )
+        split_counts["median_tat_days"] = np.where(
+            split_counts["case_type"] == "Straight Through",
+            straight_median_tat,
+            multi_median_tat,
+        )
+        split_counts["median_tat_text"] = split_counts["median_tat_days"].apply(
+            lambda x: f"{x:.2f} days" if pd.notna(x) else "NA"
+        )
+        custom_data = np.stack([split_counts["median_tat_text"]], axis=-1)
+
+        fig_open_split = go.Figure(
+            data=[
+                go.Pie(
+                    labels=split_counts["case_type"],
+                    values=split_counts["cases"],
+                    customdata=custom_data,
+                    marker=dict(
+                        colors=[case_type_colors.get(label, "#636EFA") for label in split_counts["case_type"]]
+                    ),
+                    texttemplate="%{label}<br>%{percent}<br>Median TAT: %{customdata[0]}",
+                    hovertemplate=(
+                        "<b>%{label}</b><br>"
+                        "Cases: %{value:,.0f}<br>"
+                        "Share: %{percent}<br>"
+                        "Median TAT: %{customdata[0]}<extra></extra>"
+                    ),
+                )
+            ]
+        )
+        fig_open_split.update_layout(title="Open Cases - Straight Through vs Multi Hold (with Median TAT)")
+        render_plotly_chart(fig_open_split, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("4) StraightThrough Cases")
+    st.subheader("4) Open Case Median Days and Average Touches")
+    o3, o4 = st.columns(2)
+    with o3:
+        median_open_days = (
+            open_work[open_work["open_days"].notna()]
+            .groupby("case_type", as_index=False)
+            .agg(
+                median_open_days=("open_days", "median"),
+                cases=("request_id", "size"),
+            )
+        )
+        if median_open_days.empty:
+            st.info("No valid open-day values to calculate median by case type.")
+        else:
+            median_open_days["case_type"] = pd.Categorical(
+                median_open_days["case_type"], categories=case_type_order, ordered=True
+            )
+            median_open_days = median_open_days.sort_values("case_type")
+            fig_open_median = px.bar(
+                median_open_days,
+                x="case_type",
+                y="median_open_days",
+                text="median_open_days",
+                color="case_type",
+                color_discrete_map=case_type_colors,
+                title="Median Open Days by Case Type",
+                hover_data={"cases": ":,.0f", "median_open_days": ":.2f"},
+            )
+            add_bar_labels(fig_open_median, orientation="v", value_type="days", use_text_field=True)
+            fig_open_median.update_layout(
+                xaxis_title="Case Type",
+                yaxis_title="Median Open Days",
+                showlegend=False,
+            )
+            render_plotly_chart(fig_open_median, use_container_width=True)
+
+    with o4:
+        avg_touches = (
+            open_work.groupby("case_type", as_index=False)
+            .agg(
+                avg_touches=("touches", "mean"),
+                cases=("request_id", "size"),
+            )
+        )
+        if avg_touches.empty:
+            st.info("No open case data available for touches analysis.")
+        else:
+            avg_touches["case_type"] = pd.Categorical(avg_touches["case_type"], categories=case_type_order, ordered=True)
+            avg_touches = avg_touches.sort_values("case_type")
+            fig_touches = px.bar(
+                avg_touches,
+                x="case_type",
+                y="avg_touches",
+                text="avg_touches",
+                color="case_type",
+                color_discrete_map=case_type_colors,
+                title="Average Number of Touches by Case Type",
+                hover_data={"cases": ":,.0f", "avg_touches": ":.2f"},
+            )
+            add_bar_labels(fig_touches, orientation="v", value_type="days", use_text_field=True)
+            fig_touches.update_layout(
+                xaxis_title="Case Type",
+                yaxis_title="Average Touches",
+                showlegend=False,
+            )
+            render_plotly_chart(fig_touches, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("5) StraightThrough Cases")
     s1, s2 = st.columns(2)
     straight_tat_source = completed_straight_df[completed_straight_df["net_tat_days"].notna()].copy()
     with s1:
@@ -721,7 +817,7 @@ with tab_cycle:
             title="StraightThrough % within Completed by Month",
         )
         fig_straight.update_layout(xaxis_title="Create Month", yaxis_title="StraightThrough % in Completed")
-        st.plotly_chart(fig_straight, use_container_width=True)
+        render_plotly_chart(fig_straight, use_container_width=True)
 
     with s2:
         st.metric(
@@ -828,7 +924,7 @@ with tab_multi:
                     hover_data={"cases": ":,.0f", "total_cases": ":,.0f", "pct": ":.2f"},
                 )
                 fig_mh_pct.update_layout(xaxis_title="Create Month", yaxis_title="Multi Hold %")
-                st.plotly_chart(fig_mh_pct, use_container_width=True)
+                render_plotly_chart(fig_mh_pct, use_container_width=True)
 
         with sec1_right:
             make_bucket_month_bar(
@@ -875,7 +971,7 @@ with tab_multi:
                     title="Multi Hold - Average Number of Touches Over Time",
                 )
                 fig_touches.update_layout(xaxis_title="Create Month", yaxis_title="Touches")
-                st.plotly_chart(fig_touches, use_container_width=True)
+                render_plotly_chart(fig_touches, use_container_width=True)
 
         with tsec2:
             if multi_hold_reasons_all.empty:
@@ -909,7 +1005,7 @@ with tab_multi:
                 )
                 add_bar_labels(fig_reason_dist, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_reason_dist.update_layout(xaxis_title="Create Month", yaxis_title="Share of Hold Events (%)", legend_title="Hold Reason")
-                st.plotly_chart(fig_reason_dist, use_container_width=True)
+                render_plotly_chart(fig_reason_dist, use_container_width=True)
 
         role_map = {
             "Account Analyst": "account_analyst_value",
@@ -944,7 +1040,7 @@ with tab_multi:
                 )
                 add_bar_labels(fig_handlers, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_handlers.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=role_choice)
-                st.plotly_chart(fig_handlers, use_container_width=True)
+                render_plotly_chart(fig_handlers, use_container_width=True)
 
         st.markdown("---")
         st.markdown("### 3) Multi Hold Cases with TAT 5-7 or 7+ Days (Top 5 Drivers)")
@@ -998,7 +1094,7 @@ with tab_multi:
                 )
                 add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=value_label)
-                st.plotly_chart(fig, use_container_width=True)
+                render_plotly_chart(fig, use_container_width=True)
 
             c1, c2 = st.columns(2)
             with c1:
@@ -1077,7 +1173,7 @@ with tab_multi:
                 )
                 add_bar_labels(fig_reason, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_reason.update_layout(xaxis_title="Create Month", yaxis_title="Share of Hold Reason Events (%)", legend_title="Hold Reason")
-                st.plotly_chart(fig_reason, use_container_width=True)
+                render_plotly_chart(fig_reason, use_container_width=True)
 
         with sec3_right:
             reason_options = ["All"]
@@ -1206,7 +1302,7 @@ with tab_agent:
             )
             add_bar_labels(fig, orientation="h", value_type="percent")
             fig.update_layout(xaxis_title="Share (%)", yaxis_title=y_label.replace("_", " ").title())
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(fig, use_container_width=True)
 
         def monthly_person_tat(source_df: pd.DataFrame, person_col: str, min_cases: int) -> pd.DataFrame:
             valid = source_df[source_df["create_month"].notna() & (source_df["create_month"] != "NaT")].copy()
@@ -1373,93 +1469,244 @@ with tab_agent:
             st.dataframe(styled, use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 0) Month-wise TAT Scatter and High-TAT Leaders")
-        analyst_monthly = monthly_person_tat(people_focus, "account_analyst_value", int(min_cases_people))
-        broker_monthly = monthly_person_tat(people_focus, "agent_broker_value", int(min_cases_people))
+        st.markdown("### 0) Month-wise Average TAT and Top 5 Highest TAT Handlers")
+        st.caption("Uses the minimum handled cases filter above.")
 
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            if analyst_monthly.empty:
-                st.info("No eligible analyst month-wise points for scatter.")
-            else:
-                fig_analyst_scatter = px.scatter(
-                    analyst_monthly,
-                    x="create_month",
-                    y="avg_tat_days",
-                    size="cases",
-                    color="avg_tat_days",
-                    color_continuous_scale="YlOrRd",
-                    hover_data={"person": True, "cases": ":,.0f", "avg_tat_days": ":.2f"},
-                    title="Analyst - Month-wise Avg TAT Scatter",
+        def monthly_avg_tat_for_role(
+            source_df: pd.DataFrame, person_col: str, min_cases: int, top_n_people: int
+        ) -> pd.DataFrame:
+            work = source_df[source_df["create_month"].notna() & (source_df["create_month"] != "NaT")].copy()
+            if work.empty:
+                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
+            work[person_col] = work[person_col].astype("string").fillna("Unknown").replace("", "Unknown")
+            work = work[work[person_col] != "Unknown"]
+            if work.empty:
+                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
+
+            person_counts = work[person_col].value_counts()
+            eligible_people = person_counts[person_counts >= min_cases].head(top_n_people).index.tolist()
+            if not eligible_people:
+                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
+
+            work = work[work[person_col].isin(eligible_people)].copy()
+            out = (
+                work.groupby(["create_month", person_col], as_index=False)
+                .agg(cases=("request_id", "size"), avg_tat_days=("net_tat_days", "mean"))
+                .rename(columns={person_col: "person"})
+                .sort_values("create_month")
+            )
+            return out
+
+        def top5_people_high_tat(source_df: pd.DataFrame, person_col: str, min_cases: int) -> pd.DataFrame:
+            work = source_df.copy()
+            work[person_col] = work[person_col].astype("string").fillna("Unknown").replace("", "Unknown")
+            work = work[work[person_col] != "Unknown"]
+            if work.empty:
+                return pd.DataFrame(columns=["person", "cases", "avg_tat_days", "p90_tat_days"])
+
+            out = (
+                work.groupby(person_col, as_index=False)
+                .agg(
+                    cases=("request_id", "size"),
+                    avg_tat_days=("net_tat_days", "mean"),
+                    p90_tat_days=("net_tat_days", lambda s: s.quantile(0.9) if s.notna().any() else np.nan),
                 )
-                fig_analyst_scatter.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)")
-                st.plotly_chart(fig_analyst_scatter, use_container_width=True)
-        with sc2:
-            if broker_monthly.empty:
-                st.info("No eligible broker month-wise points for scatter.")
+                .rename(columns={person_col: "person"})
+            )
+            out = out[out["cases"] >= min_cases].copy()
+            if out.empty:
+                return pd.DataFrame(columns=["person", "cases", "avg_tat_days", "p90_tat_days"])
+            return out.sort_values(["avg_tat_days", "p90_tat_days", "cases"], ascending=[False, False, False]).head(5)
+
+        def top_reason_sets_for_people(source_df: pd.DataFrame, person_col: str, top_people: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+            if not top_people:
+                return pd.DataFrame(), pd.DataFrame()
+            subset = source_df[source_df[person_col].astype("string").isin(top_people)].copy()
+            if subset.empty:
+                return pd.DataFrame(), pd.DataFrame()
+
+            hold_events = explode_hold_reasons(subset, metadata.get("hold_reason_col"))
+            if hold_events.empty:
+                hold_top = pd.DataFrame(columns=["reason", "cases", "share_pct"])
             else:
-                fig_broker_scatter = px.scatter(
+                hold_top = (
+                    hold_events.groupby("hold_reason_short", as_index=False)
+                    .agg(cases=("request_id", "nunique"))
+                    .rename(columns={"hold_reason_short": "reason"})
+                    .sort_values("cases", ascending=False)
+                    .head(5)
+                )
+                hold_top["share_pct"] = hold_top["cases"].apply(lambda x: pct_value(x, max(len(subset), 1)))
+
+            reason_series = subset["write_out_reason_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+            if reason_series.replace("Unknown", pd.NA).dropna().empty:
+                reason_series = subset["request_type_value"].astype("string").fillna("Unknown").replace("", "Unknown")
+            reason_top = (
+                reason_series.value_counts()
+                .head(5)
+                .rename_axis("reason")
+                .reset_index(name="cases")
+            )
+            reason_top["share_pct"] = reason_top["cases"].apply(lambda x: pct_value(x, max(len(subset), 1)))
+            return hold_top, reason_top
+
+        people_top_n = st.slider(
+            "People shown in month-wise average TAT trend (per role)",
+            min_value=3,
+            max_value=15,
+            value=8,
+            step=1,
+            key="people_monthwise_top_n",
+        )
+
+        analyst_monthly = monthly_avg_tat_for_role(people_focus, "account_analyst_value", int(min_cases_people), int(people_top_n))
+        broker_monthly = monthly_avg_tat_for_role(people_focus, "agent_broker_value", int(min_cases_people), int(people_top_n))
+
+        g1, g2 = st.columns(2)
+        with g1:
+            if broker_monthly.empty:
+                st.info("No eligible broker month-wise average TAT points.")
+            else:
+                fig_broker_month = px.line(
                     broker_monthly,
                     x="create_month",
                     y="avg_tat_days",
-                    size="cases",
-                    color="avg_tat_days",
-                    color_continuous_scale="YlOrRd",
-                    hover_data={"person": True, "cases": ":,.0f", "avg_tat_days": ":.2f"},
-                    title="Broker - Month-wise Avg TAT Scatter",
+                    color="person",
+                    markers=True,
+                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f"},
+                    title="Broker - Month-wise Average TAT",
                 )
-                fig_broker_scatter.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)")
-                st.plotly_chart(fig_broker_scatter, use_container_width=True)
+                fig_broker_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)", legend_title="Broker")
+                render_plotly_chart(fig_broker_month, use_container_width=True)
+        with g2:
+            if analyst_monthly.empty:
+                st.info("No eligible analyst month-wise average TAT points.")
+            else:
+                fig_analyst_month = px.line(
+                    analyst_monthly,
+                    x="create_month",
+                    y="avg_tat_days",
+                    color="person",
+                    markers=True,
+                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f"},
+                    title="Analyst - Month-wise Average TAT",
+                )
+                fig_analyst_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)", legend_title="Analyst")
+                render_plotly_chart(fig_analyst_month, use_container_width=True)
 
-        analyst_leaders = monthly_high_tat_leaders(
-            people_focus,
-            analyst_monthly,
-            person_col="account_analyst_value",
-            person_type="Account Analyst",
-        )
-        broker_leaders = monthly_high_tat_leaders(
-            people_focus,
-            broker_monthly,
-            person_col="agent_broker_value",
-            person_type="Agent Broker",
-        )
-        leaders_all = pd.concat([analyst_leaders, broker_leaders], ignore_index=True)
+        top_brokers = top5_people_high_tat(people_focus, "agent_broker_value", int(min_cases_people))
+        top_analysts = top5_people_high_tat(people_focus, "account_analyst_value", int(min_cases_people))
 
-        if leaders_all.empty:
-            st.info("No month-wise high-TAT leader list available for analyst/broker with current filters.")
-        else:
-            fig_leaders = px.bar(
-                leaders_all,
-                x="create_month",
-                y="avg_tat_days",
-                color="person_type",
-                barmode="group",
-                hover_data={
-                    "person": True,
-                    "cases": ":,.0f",
-                    "top_request_type": True,
-                    "top_hold_reason": True,
-                    "avg_tat_days": ":.2f",
-                },
-                title="Month-wise Highest Avg TAT (Analyst vs Broker)",
+        t1, t2 = st.columns(2)
+        with t1:
+            if top_brokers.empty:
+                st.info("No broker meets the minimum handled case filter for Top 5 highest TAT.")
+            else:
+                fig_top_broker = px.bar(
+                    top_brokers.sort_values("avg_tat_days", ascending=True),
+                    x="avg_tat_days",
+                    y="person",
+                    orientation="h",
+                    text="avg_tat_days",
+                    title="Top 5 Brokers Taking Most TAT to Complete",
+                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
+                    color_discrete_sequence=["#d62728"],
+                )
+                add_bar_labels(fig_top_broker, orientation="h", value_type="days", use_text_field=True)
+                fig_top_broker.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Broker")
+                render_plotly_chart(fig_top_broker, use_container_width=True)
+        with t2:
+            if top_analysts.empty:
+                st.info("No analyst meets the minimum handled case filter for Top 5 highest TAT.")
+            else:
+                fig_top_analyst = px.bar(
+                    top_analysts.sort_values("avg_tat_days", ascending=True),
+                    x="avg_tat_days",
+                    y="person",
+                    orientation="h",
+                    text="avg_tat_days",
+                    title="Top 5 Analysts Taking Most TAT to Complete",
+                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
+                    color_discrete_sequence=["#ff7f0e"],
+                )
+                add_bar_labels(fig_top_analyst, orientation="h", value_type="days", use_text_field=True)
+                fig_top_analyst.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Analyst")
+                render_plotly_chart(fig_top_analyst, use_container_width=True)
+
+        r1, r2 = st.columns(2)
+        with r1:
+            hold_top_broker, reason_top_broker = top_reason_sets_for_people(
+                people_focus,
+                "agent_broker_value",
+                top_brokers["person"].astype(str).tolist() if not top_brokers.empty else [],
             )
-            add_bar_labels(fig_leaders, orientation="v", value_type="days")
-            fig_leaders.update_layout(xaxis_title="Create Month", yaxis_title="Highest Avg Net TAT (days)")
-            st.plotly_chart(fig_leaders, use_container_width=True)
+            if hold_top_broker.empty:
+                st.info("No hold reason data for Top 5 high-TAT brokers.")
+            else:
+                fig_hold_broker_top5 = px.bar(
+                    hold_top_broker.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Hold Reasons for Top 5 High-TAT Brokers",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#9467bd"],
+                )
+                add_bar_labels(fig_hold_broker_top5, orientation="h", value_type="percent")
+                fig_hold_broker_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
+                render_plotly_chart(fig_hold_broker_top5, use_container_width=True)
+            if reason_top_broker.empty:
+                st.info("No reason description data for Top 5 high-TAT brokers.")
+            else:
+                fig_reason_broker_top5 = px.bar(
+                    reason_top_broker.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Reason Descriptions for Top 5 High-TAT Brokers",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#2ca02c"],
+                )
+                add_bar_labels(fig_reason_broker_top5, orientation="h", value_type="percent")
+                fig_reason_broker_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Reason Description")
+                render_plotly_chart(fig_reason_broker_top5, use_container_width=True)
 
-            display_cols = [
-                "create_month",
-                "person_type",
-                "person",
-                "avg_tat_days",
-                "cases",
-                "top_request_type",
-                "top_hold_reason",
-            ]
-            st.dataframe(
-                leaders_all[display_cols].sort_values(["create_month", "person_type"]),
-                use_container_width=True,
+        with r2:
+            hold_top_analyst, reason_top_analyst = top_reason_sets_for_people(
+                people_focus,
+                "account_analyst_value",
+                top_analysts["person"].astype(str).tolist() if not top_analysts.empty else [],
             )
+            if hold_top_analyst.empty:
+                st.info("No hold reason data for Top 5 high-TAT analysts.")
+            else:
+                fig_hold_analyst_top5 = px.bar(
+                    hold_top_analyst.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Hold Reasons for Top 5 High-TAT Analysts",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#17becf"],
+                )
+                add_bar_labels(fig_hold_analyst_top5, orientation="h", value_type="percent")
+                fig_hold_analyst_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
+                render_plotly_chart(fig_hold_analyst_top5, use_container_width=True)
+            if reason_top_analyst.empty:
+                st.info("No reason description data for Top 5 high-TAT analysts.")
+            else:
+                fig_reason_analyst_top5 = px.bar(
+                    reason_top_analyst.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Reason Descriptions for Top 5 High-TAT Analysts",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#1f77b4"],
+                )
+                add_bar_labels(fig_reason_analyst_top5, orientation="h", value_type="percent")
+                fig_reason_analyst_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Reason Description")
+                render_plotly_chart(fig_reason_analyst_top5, use_container_width=True)
 
         st.markdown("---")
         st.markdown("### 1) Account Analyst")
@@ -1491,8 +1738,13 @@ with tab_agent:
             )
             render_tat_kpi_table(analyst_kpi, "#### Month-wise KPI Table (Account Analyst)")
 
-            st.markdown("#### TAT > 7 days drivers (Account Analyst)")
-            analyst_over7 = analyst_scope[analyst_scope["net_tat_days"] > 7].copy()
+            st.markdown("#### TAT > 7 days drivers (Account Analyst - Overall Cases)")
+            analyst_scope_overall = completed_people[completed_people["account_analyst_value"].isin(analysts)].copy()
+            if analyst_choice != "All":
+                analyst_scope_overall = analyst_scope_overall[
+                    analyst_scope_overall["account_analyst_value"] == analyst_choice
+                ].copy()
+            analyst_over7 = analyst_scope_overall[analyst_scope_overall["net_tat_days"] > 7].copy()
             a1, a2, a3 = st.columns(3)
             with a1:
                 plot_top_col(
@@ -1528,7 +1780,7 @@ with tab_agent:
                     )
                     add_bar_labels(fig_hold_analyst, orientation="h", value_type="percent")
                     fig_hold_analyst.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
-                    st.plotly_chart(fig_hold_analyst, use_container_width=True)
+                    render_plotly_chart(fig_hold_analyst, use_container_width=True)
             with a3:
                 plot_top_col(
                     analyst_over7,
@@ -1569,8 +1821,13 @@ with tab_agent:
             )
             render_tat_kpi_table(broker_kpi, "#### Month-wise KPI Table (Agent Broker)")
 
-            st.markdown("#### TAT > 7 days drivers (Agent Broker)")
-            broker_over7 = broker_scope[broker_scope["net_tat_days"] > 7].copy()
+            st.markdown("#### TAT > 7 days drivers (Agent Broker - Overall Cases)")
+            broker_scope_overall = completed_people[completed_people["agent_broker_value"].isin(brokers)].copy()
+            if broker_choice != "All":
+                broker_scope_overall = broker_scope_overall[
+                    broker_scope_overall["agent_broker_value"] == broker_choice
+                ].copy()
+            broker_over7 = broker_scope_overall[broker_scope_overall["net_tat_days"] > 7].copy()
             b1, b2, b3 = st.columns(3)
             with b1:
                 plot_top_col(
@@ -1606,7 +1863,7 @@ with tab_agent:
                     )
                     add_bar_labels(fig_hold_broker, orientation="h", value_type="percent")
                     fig_hold_broker.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
-                    st.plotly_chart(fig_hold_broker, use_container_width=True)
+                    render_plotly_chart(fig_hold_broker, use_container_width=True)
             with b3:
                 plot_top_col(
                     broker_over7,
@@ -1619,20 +1876,62 @@ with tab_agent:
 
 with tab_straight:
     st.subheader("Straight Through Cases")
-    st.caption("TAT Cases with TAT 5-7 or 7+ Days (Top 5 Drivers) over month.")
+    straight_completed_tat = completed_straight_df[completed_straight_df["net_tat_days"].notna()].copy()
+    straight_tat_counts = (
+        straight_completed_tat["tat_bucket"]
+        .astype("string")
+        .value_counts()
+        .reindex(TAT_BUCKET_ORDER, fill_value=0)
+        .rename_axis("bucket")
+        .reset_index(name="count")
+    )
+    straight_tat_counts["share_pct"] = straight_tat_counts["count"].apply(
+        lambda x: pct_value(x, len(straight_completed_tat))
+    )
 
-    straight_long_tat = completed_straight_df[
-        completed_straight_df["tat_bucket"].astype("string").isin(["5-7 days", "7+ days"])
-    ].copy()
+    st.markdown("### 1) StraightThrough Counts and TAT Bucket Counts")
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("StraightThrough Cases (All)", f"{len(straight_df):,}")
+    s2.metric("StraightThrough Completed Cases", f"{len(completed_straight_df):,}")
+    s3.metric("1-4 Days", f"{int(straight_tat_counts.loc[straight_tat_counts['bucket'] == '1-4 days', 'count'].iloc[0]):,}")
+    s4.metric("5-7 Days", f"{int(straight_tat_counts.loc[straight_tat_counts['bucket'] == '5-7 days', 'count'].iloc[0]):,}")
+    s5.metric("7+ Days", f"{int(straight_tat_counts.loc[straight_tat_counts['bucket'] == '7+ days', 'count'].iloc[0]):,}")
 
-    s1, s2 = st.columns(2)
-    with s1:
-        st.metric("StraightThrough Completed Cases", f"{len(completed_straight_df):,}")
-    with s2:
-        st.metric(
-            "StraightThrough Cases in TAT 5-7/7+",
-            f"{len(straight_long_tat):,}",
+    b1, b2 = st.columns(2)
+    with b1:
+        make_bucket_bar(
+            straight_tat_counts,
+            bucket_col="bucket",
+            count_col="count",
+            color_map=TAT_BUCKET_COLORS,
+            title="StraightThrough Completed - TAT Bucket (%)",
+            category_order=TAT_BUCKET_ORDER,
         )
+    with b2:
+        bucket_table = straight_tat_counts.copy()
+        bucket_table.columns = ["TAT Bucket", "Count", "Share %"]
+        st.dataframe(
+            bucket_table.style.format({"Count": "{:,.0f}", "Share %": "{:.2f}%"}),
+            use_container_width=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### 2) Bucket-wise StraightThrough Cases Over Months")
+    make_bucket_month_bar(
+        straight_completed_tat,
+        bucket_col="tat_bucket",
+        title="StraightThrough Completed - TAT Bucket by Month (%)",
+        color_map=TAT_BUCKET_COLORS,
+        category_order=TAT_BUCKET_ORDER,
+    )
+
+    st.markdown("---")
+    st.markdown("### 3) StraightThrough Cases with TAT 5-7 or 7+ Days (Top 5 Drivers)")
+
+    straight_long_tat = straight_completed_tat[
+        straight_completed_tat["tat_bucket"].astype("string").isin(["5-7 days", "7+ days"])
+    ].copy()
+    st.metric("StraightThrough Cases in TAT 5-7/7+", f"{len(straight_long_tat):,}")
 
     if straight_long_tat.empty:
         st.info("No straight-through completed cases found in TAT buckets 5-7 or 7+ days.")
@@ -1679,7 +1978,7 @@ with tab_straight:
             )
             add_bar_labels(fig, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
             fig.update_layout(xaxis_title="Create Month", yaxis_title="Share of Month (%)", legend_title=value_label)
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(fig, use_container_width=True)
 
         st1, st2 = st.columns(2)
         with st1:
@@ -1787,7 +2086,158 @@ with tab_market:
                 )
                 add_bar_labels(fig_bgi_overall, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
                 fig_bgi_overall.update_layout(xaxis_title="Create Month", yaxis_title="% of Overall Cases", legend_title="BGI Description")
-                st.plotly_chart(fig_bgi_overall, use_container_width=True)
+                render_plotly_chart(fig_bgi_overall, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### Month-wise BGI Taking Most Time (Flagged for 5-7 and 5+ TAT)")
+        bgi_month_perf = market_base[
+            market_base["create_month"].notna() & (market_base["create_month"] != "NaT")
+        ].copy()
+        if bgi_month_perf.empty:
+            st.info("No valid month values available for BGI time-taking analysis.")
+        else:
+            bgi_month_perf["tat_bucket_str"] = bgi_month_perf["tat_bucket"].astype("string")
+            bgi_month_summary = (
+                bgi_month_perf.groupby(["create_month", "bgi_desc_value"], as_index=False)
+                .agg(
+                    cases=("request_id", "size"),
+                    avg_tat_days=("net_tat_days", "mean"),
+                    p90_tat_days=("net_tat_days", lambda s: s.quantile(0.9) if s.notna().any() else np.nan),
+                    tat_5_7_cases=("tat_bucket_str", lambda s: (s == "5-7 days").sum()),
+                    tat_7_plus_cases=("tat_bucket_str", lambda s: (s == "7+ days").sum()),
+                )
+                .sort_values("create_month")
+            )
+            bgi_month_summary["tat_5_plus_cases"] = bgi_month_summary["tat_5_7_cases"] + bgi_month_summary["tat_7_plus_cases"]
+            bgi_month_summary["tat_5_7_pct"] = bgi_month_summary.apply(
+                lambda r: pct_value(r["tat_5_7_cases"], r["cases"]), axis=1
+            )
+            bgi_month_summary["tat_7_plus_pct"] = bgi_month_summary.apply(
+                lambda r: pct_value(r["tat_7_plus_cases"], r["cases"]), axis=1
+            )
+            bgi_month_summary["tat_5_plus_pct"] = bgi_month_summary.apply(
+                lambda r: pct_value(r["tat_5_plus_cases"], r["cases"]), axis=1
+            )
+            bgi_month_summary["flag"] = np.where(
+                bgi_month_summary["tat_7_plus_pct"] > 0,
+                "Red Flag (7+ present)",
+                np.where(
+                    bgi_month_summary["tat_5_7_pct"] > 0,
+                    "Amber Flag (5-7 present)",
+                    "No Flag",
+                ),
+            )
+
+            min_cases_market = st.slider(
+                "Minimum cases per Month-BGI for flag view",
+                min_value=1,
+                max_value=100,
+                value=10,
+                step=1,
+                key="market_min_cases",
+            )
+            bgi_month_eligible = bgi_month_summary[bgi_month_summary["cases"] >= min_cases_market].copy()
+
+            if bgi_month_eligible.empty:
+                st.info("No Month-BGI groups meet the minimum case threshold.")
+            else:
+                bgi_top_month = (
+                    bgi_month_eligible.sort_values(
+                        ["create_month", "avg_tat_days", "tat_5_plus_pct", "cases"],
+                        ascending=[True, False, False, False],
+                    )
+                    .groupby("create_month", as_index=False)
+                    .head(1)
+                    .sort_values("create_month")
+                )
+                bgi_top_month["bgi_label"] = bgi_top_month["bgi_desc_value"].astype(str).str.slice(0, 28)
+
+                mm1, mm2 = st.columns(2)
+                with mm1:
+                    fig_bgi_most_time = px.bar(
+                        bgi_top_month,
+                        x="create_month",
+                        y="avg_tat_days",
+                        color="flag",
+                        text="bgi_label",
+                        title="Month-wise BGI Taking Most Time (Highest Avg TAT)",
+                        color_discrete_map={
+                            "Red Flag (7+ present)": "#d62728",
+                            "Amber Flag (5-7 present)": "#FFBF00",
+                            "No Flag": "#2ca02c",
+                        },
+                        hover_data={
+                            "bgi_desc_value": True,
+                            "cases": ":,.0f",
+                            "avg_tat_days": ":.2f",
+                            "p90_tat_days": ":.2f",
+                            "tat_5_7_pct": ":.2f",
+                            "tat_7_plus_pct": ":.2f",
+                            "tat_5_plus_pct": ":.2f",
+                        },
+                    )
+                    fig_bgi_most_time.update_traces(textposition="inside")
+                    fig_bgi_most_time.update_layout(
+                        xaxis_title="Create Month",
+                        yaxis_title="Average Net TAT (days)",
+                        legend_title="Flag",
+                    )
+                    render_plotly_chart(fig_bgi_most_time, use_container_width=True)
+
+                with mm2:
+                    top_flag_long = bgi_top_month.melt(
+                        id_vars=["create_month", "bgi_desc_value", "cases"],
+                        value_vars=["tat_5_7_pct", "tat_7_plus_pct"],
+                        var_name="tat_flag_bucket",
+                        value_name="pct",
+                    )
+                    top_flag_long["tat_flag_bucket"] = top_flag_long["tat_flag_bucket"].map(
+                        {"tat_5_7_pct": "TAT 5-7 days", "tat_7_plus_pct": "TAT 7+ days"}
+                    )
+                    fig_flag_bucket = px.bar(
+                        top_flag_long,
+                        x="create_month",
+                        y="pct",
+                        text="pct",
+                        color="tat_flag_bucket",
+                        barmode="stack",
+                        title="Flagged Bucket Share for Top BGI Each Month",
+                        color_discrete_map={"TAT 5-7 days": "#FFBF00", "TAT 7+ days": "#d62728"},
+                        hover_data={"bgi_desc_value": True, "cases": ":,.0f", "pct": ":.2f"},
+                    )
+                    add_bar_labels(fig_flag_bucket, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
+                    fig_flag_bucket.update_layout(
+                        xaxis_title="Create Month",
+                        yaxis_title="Share within that Month-BGI (%)",
+                        legend_title="TAT Flag Bucket",
+                    )
+                    render_plotly_chart(fig_flag_bucket, use_container_width=True)
+
+                show_cols = [
+                    "create_month",
+                    "bgi_desc_value",
+                    "cases",
+                    "avg_tat_days",
+                    "p90_tat_days",
+                    "tat_5_7_pct",
+                    "tat_7_plus_pct",
+                    "tat_5_plus_pct",
+                    "flag",
+                ]
+                st.dataframe(
+                    bgi_top_month[show_cols].style.format(
+                        {
+                            "cases": "{:,.0f}",
+                            "avg_tat_days": "{:.2f}",
+                            "p90_tat_days": "{:.2f}",
+                            "tat_5_7_pct": "{:.2f}%",
+                            "tat_7_plus_pct": "{:.2f}%",
+                            "tat_5_plus_pct": "{:.2f}%",
+                        },
+                        na_rep="NA",
+                    ),
+                    use_container_width=True,
+                )
 
         st.markdown("### Average TAT by BGI Description")
         bgi_avg = (
@@ -1814,7 +2264,7 @@ with tab_market:
         )
         add_bar_labels(fig_bgi_avg, orientation="h", value_type="days")
         fig_bgi_avg.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="BGI Description")
-        st.plotly_chart(fig_bgi_avg, use_container_width=True)
+        render_plotly_chart(fig_bgi_avg, use_container_width=True)
 
         st.dataframe(
             bgi_avg.style.format(
@@ -1879,7 +2329,7 @@ with tab_reson:
                 )
                 fig.update_traces(texttemplate="%{text:.1f}%", textposition="inside")
                 fig.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title=y_label)
-                st.plotly_chart(fig, use_container_width=True)
+                render_plotly_chart(fig, use_container_width=True)
             with c2:
                 st.dataframe(
                     summary[["data_point", "cases", "share_pct", "avg_tat_days"]].style.format(
