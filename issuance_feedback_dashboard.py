@@ -504,7 +504,7 @@ def make_bucket_month_bar(
     st.plotly_chart(fig, use_container_width=True)
 
 
-st.title("Auto Issuance - leakage Dashboard")
+st.title("Auto Issuance Speed to Market – Business Intelligence Prescriptive")
 st.caption("Fresh version focused on overall completion, open, and straight-through views.")
 
 st.sidebar.header("Input")
@@ -666,13 +666,21 @@ with tab_cycle:
         fig_completion.update_layout(xaxis_title="Create Month", yaxis_title="Percent (%)")
         st.plotly_chart(fig_completion, use_container_width=True)
     with c2_right:
-        make_bucket_month_bar(
-            completed_tat,
-            bucket_col="tat_bucket",
-            title="Completed Cases - TAT Bucket by Month (%)",
-            color_map=TAT_BUCKET_COLORS,
-            category_order=TAT_BUCKET_ORDER,
-        )
+        if completed_tat.empty:
+            st.info("No completed cases with valid issuance days for percentile trend.")
+        else:
+            p50_all = completed_tat["net_tat_days"].quantile(0.5)
+            p90_all = completed_tat["net_tat_days"].quantile(0.9)
+            p2a, p2b = st.columns(2)
+            p2a.metric("Median Days of Issuance (P50)", f"{p50_all:.2f} days")
+            p2b.metric("Days of Issuance Excluding Outliers (P90)", f"{p90_all:.2f} days")
+            make_bucket_month_bar(
+                completed_tat,
+                bucket_col="tat_bucket",
+                title=f"Completed Cases - TAT Bucket by Month (%) | P50: {p50_all:.2f}d, P90: {p90_all:.2f}d",
+                color_map=TAT_BUCKET_COLORS,
+                category_order=TAT_BUCKET_ORDER,
+            )
 
     st.markdown("---")
     st.subheader("3) Open Cases")
