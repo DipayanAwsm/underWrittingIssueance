@@ -49,6 +49,7 @@ HOLD_BUCKET_COLORS = {
     "5-7 days": "#FFBF00",
     "7+ days": "#d62728",
 }
+SHOW_CALC_DETAILS = True
 
 
 def normalize_name(name: str) -> str:
@@ -438,6 +439,67 @@ def add_bar_labels(
 
 
 _plotly_chart_counter = 0
+_calc_note_counter = 0
+_table_note_counter = 0
+
+
+def get_chart_calc_lines(title: str) -> List[str]:
+    t = (title or "").strip().lower()
+    lines: List[str] = [
+        "Base data: current global filters are applied first (create month range + request type filter).",
+        "Percent values use: (numerator / denominator) * 100.",
+    ]
+
+    if "tat" in t:
+        lines += [
+            "Completed case definition: completedDateTime is present/valid.",
+            "Gross TAT (days) = (completedDateTime - createDateTime) in days.",
+            "Net TAT (days) = Gross TAT - total_hold_days.",
+        ]
+    if "tat bucket" in t:
+        lines += [
+            "TAT bucket rules: 1-4 days, 5-7 days, 7+ days.",
+            "Month-wise bucket chart: bucket share in a month = bucket cases / total cases in that month.",
+        ]
+    if "p50" in t or "median" in t:
+        lines.append("P50/Median = 50th percentile (`quantile(0.5)`).")
+    if "p90" in t:
+        lines.append("P90 = 90th percentile (`quantile(0.9)`), used as outlier-excluded high-end benchmark.")
+    if "open cases - straight through vs multi hold" in t:
+        lines += [
+            "Straight Through = hold_reason_count == 0.",
+            "Multi Hold = hold_reason_count >= 1.",
+            "Slice share = case_type_count / total_open_cases.",
+            "Median TAT in slice label is from completed cases of that type with valid net_tat_days.",
+        ]
+    if "touch" in t:
+        lines.append("Touches = hold_reason_count + 1.")
+    if "month-wise" in t:
+        lines.append("Month-wise grouping key: create_month derived from createDateTime.")
+    if "top 5" in t or "top" in t:
+        lines.append("Top-N lists are ranked by highest count in the currently filtered dataset.")
+    if "hold reason" in t:
+        lines.append("Hold reasons are exploded from onHoldReasonDescriptionsHistory; each parsed reason is counted.")
+    if "reason description" in t:
+        lines.append("Reason Description uses writeOutReasonDescriptionsHistory (fallback: requestTypeDescription when missing).")
+
+    # De-duplicate while preserving order
+    deduped: List[str] = []
+    seen = set()
+    for line in lines:
+        if line not in seen:
+            deduped.append(line)
+            seen.add(line)
+    return deduped
+
+
+def render_calc_note(lines: List[str], label_prefix: str) -> None:
+    global _calc_note_counter
+    if not SHOW_CALC_DETAILS:
+        return
+    _calc_note_counter += 1
+    st.caption(f"{label_prefix} ({_calc_note_counter})")
+    st.markdown("\n".join([f"- {line}" for line in lines]))
 
 
 def render_plotly_chart(fig: object, **kwargs) -> None:
@@ -446,6 +508,29 @@ def render_plotly_chart(fig: object, **kwargs) -> None:
         _plotly_chart_counter += 1
         kwargs["key"] = f"plotly_{_plotly_chart_counter}"
     st.plotly_chart(fig, **kwargs)
+    title_text = ""
+    try:
+        title_text = str(getattr(getattr(fig, "layout", None), "title", None).text or "")
+    except Exception:
+        title_text = ""
+    render_calc_note(get_chart_calc_lines(title_text), "How this chart is calculated")
+
+
+def render_dataframe(data: object, **kwargs) -> None:
+    global _table_note_counter
+    st.dataframe(data, **kwargs)
+    if SHOW_CALC_DETAILS:
+        _table_note_counter += 1
+        render_calc_note(
+            [
+                "This table is computed from the currently filtered dataset.",
+                "Count columns use grouped record count (`size`) or distinct request count (`nunique`) based on table logic.",
+                "Share % columns use: part / relevant total * 100.",
+                "Average columns use arithmetic mean over non-null values.",
+                "P50/P90 columns use quantiles (`quantile(0.5)` / `quantile(0.9)`).",
+            ],
+            "How this table is calculated",
+        )
 
 
 def make_bucket_bar(
@@ -570,9 +655,14 @@ df, metadata = prepare_data(raw_df)
 
 with st.expander("Detected columns and source"):
     st.write({"source": source, **metadata})
-    st.dataframe(df.head(10), use_container_width=True)
+    render_dataframe(df.head(10), use_container_width=True)
 
 st.sidebar.header("Global Filter")
+SHOW_CALC_DETAILS = st.sidebar.checkbox(
+    "Show calculation details under every chart/table",
+    value=True,
+    key="show_calc_details_global",
+)
 filtered = df.copy()
 if filtered["create_month_dt"].notna().any():
     month_starts = sorted(pd.to_datetime(filtered["create_month_dt"].dropna().unique()))
@@ -590,9 +680,57 @@ if filtered["create_month_dt"].notna().any():
         end_month = label_to_month[selected[1]] + pd.offsets.MonthEnd(1) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         filtered = filtered[filtered["create_dt"].between(start_month, end_month, inclusive="both")]
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Request Type Filter (requestTypeDescription)**")
+request_type_values = sorted(
+    filtered["request_type_value"].astype("string").fillna("Unknown").replace("", "Unknown").unique().tolist()
+)
+issuance_like_options = [
+    v
+    for v in request_type_values
+    if any(token in str(v).lower() for token in ["issuance", "issueance", "reissuance", "re-issuance"])
+]
+request_type_options = issuance_like_options if issuance_like_options else request_type_values
+if issuance_like_options:
+    st.sidebar.caption("Showing all Issuance/Issueance variations.")
+else:
+    st.sidebar.caption("No Issuance variation found. Showing all request types.")
+
+all_request_type = st.sidebar.checkbox("All", value=True, key="global_request_type_all")
+selected_request_types: List[str] = []
+for idx, option in enumerate(request_type_options):
+    checked = st.sidebar.checkbox(
+        str(option),
+        value=all_request_type,
+        key=f"global_request_type_option_{idx}_{normalize_name(str(option))}",
+    )
+    if checked:
+        selected_request_types.append(str(option))
+
+if not all_request_type:
+    if selected_request_types:
+        filtered = filtered[filtered["request_type_value"].astype(str).isin(selected_request_types)]
+    else:
+        filtered = filtered.iloc[0:0]
+
 if filtered.empty:
     st.warning("No rows available after filters.")
     st.stop()
+
+if SHOW_CALC_DETAILS:
+    with st.expander("Calculation Dictionary (applies to all visuals)", expanded=False):
+        st.markdown("- Completed cases: `completedDateTime` is valid/present.")
+        st.markdown("- Open cases: `completedDateTime` is null/empty.")
+        st.markdown("- Total hold days: sum of valid `(offHoldDatesHistory[i] - onHoldDatesHistory[i])` in days.")
+        st.markdown("- Missing `offHoldDatesHistory[i]` is treated as no hold for that index.")
+        st.markdown("- Straight Through: `hold_reason_count == 0`.")
+        st.markdown("- Multi Hold: `hold_reason_count >= 1`.")
+        st.markdown("- Touches: `hold_reason_count + 1`.")
+        st.markdown("- Gross TAT (days): `(completedDateTime - createDateTime)`.")
+        st.markdown("- Net TAT (days): `Gross TAT - total_hold_days`.")
+        st.markdown("- TAT buckets: `1-4`, `5-7`, `7+` days.")
+        st.markdown("- Percent values: `(numerator / denominator) * 100`.")
+        st.markdown("- P50: `quantile(0.5)`, P90: `quantile(0.9)`.")
 
 total_cases = len(filtered)
 completed_df = filtered[filtered["is_completed"]].copy()
@@ -623,6 +761,24 @@ with tab_cycle:
     a3.metric("StraightThrough % Cases", pct_text(len(straight_df), total_cases))
     a4.metric("Multi Hold % Cases", pct_text(len(multi_hold_df), total_cases))
     a5.metric("Open % Cases", pct_text(len(open_df), total_cases))
+
+    overall_tat = completed_df[completed_df["net_tat_days"].notna()].copy()
+    if overall_tat.empty:
+        st.info("No completed cases with valid Net TAT available for overall TAT box plot.")
+    else:
+        fig_overall_tat_box = px.box(
+            overall_tat,
+            y="net_tat_days",
+            points="outliers",
+            title="Overall Snapshot - Net TAT Distribution (Box Plot)",
+            color_discrete_sequence=["#1f77b4"],
+        )
+        fig_overall_tat_box.update_layout(
+            xaxis_title="",
+            yaxis_title="Net TAT (days)",
+            showlegend=False,
+        )
+        render_plotly_chart(fig_overall_tat_box, use_container_width=True)
 
     st.markdown("---")
     st.subheader("2) Completed Cases")
@@ -1020,7 +1176,7 @@ with tab_multi:
                 st.info(f"No {role_choice} values available for multi-hold handler summary.")
             else:
                 show_handler = handler_summary[["handler", "cases", "share_pct"]].copy()
-                st.dataframe(
+                render_dataframe(
                     show_handler.style.format({"cases": "{:,.0f}", "share_pct": "{:.2f}%"}),
                     use_container_width=True,
                 )
@@ -1213,52 +1369,14 @@ with tab_multi:
 
 with tab_agent:
     st.subheader("People Analysis")
-    st.caption(
-        "Focus cohort defaults to Net TAT 4-7 days and includes only people handling at least 10 cases in that cohort."
-    )
+    st.caption("Analysis is based on all completed cases with valid Net TAT.")
 
     completed_people = completed_df[completed_df["net_tat_days"].notna()].copy()
     if completed_people.empty:
         st.info("No completed cases with valid Net TAT available for people analysis.")
     else:
-        tat_min = float(np.floor(completed_people["net_tat_days"].min()))
-        tat_max = float(np.ceil(completed_people["net_tat_days"].max()))
-        if tat_max < tat_min:
-            tat_min, tat_max = 0.0, 7.0
-
-        default_low = max(tat_min, 4.0)
-        default_high = min(tat_max, 7.0)
-        if default_high < default_low:
-            default_low, default_high = tat_min, tat_max
-
-        p1, p2, p3 = st.columns(3)
-        with p1:
-            if tat_min == tat_max:
-                tat_range = (tat_min, tat_max)
-                st.caption(f"Net TAT range fixed at {tat_min:.1f} days (single-value dataset).")
-            else:
-                tat_range = st.slider(
-                    "Net TAT focus range (days)",
-                    min_value=tat_min,
-                    max_value=tat_max,
-                    value=(default_low, default_high),
-                    step=0.5,
-                )
-        with p2:
-            min_cases_people = st.number_input(
-                "Minimum handled cases",
-                min_value=1,
-                max_value=1000,
-                value=10,
-                step=1,
-            )
-        with p3:
-            st.metric("Completed Cases (Valid TAT)", f"{len(completed_people):,}")
-
-        people_focus = completed_people[
-            completed_people["net_tat_days"].between(tat_range[0], tat_range[1], inclusive="both")
-        ].copy()
-        st.metric("Cases in selected TAT range", f"{len(people_focus):,}")
+        min_cases_people = 10
+        people_focus = completed_people.copy()
 
         def eligible_names(source_df: pd.DataFrame, col_name: str, min_cases: int) -> List[str]:
             work = source_df.copy()
@@ -1466,7 +1584,7 @@ with tab_agent:
                 )
                 .map(style_tat, subset=["avg_tat_days", "p90_tat_days"])
             )
-            st.dataframe(styled, use_container_width=True)
+            render_dataframe(styled, use_container_width=True)
 
         st.markdown("---")
         st.markdown("### 0) Month-wise Average TAT and Top 5 Highest TAT Handlers")
@@ -1910,7 +2028,7 @@ with tab_straight:
     with b2:
         bucket_table = straight_tat_counts.copy()
         bucket_table.columns = ["TAT Bucket", "Count", "Share %"]
-        st.dataframe(
+        render_dataframe(
             bucket_table.style.format({"Count": "{:,.0f}", "Share %": "{:.2f}%"}),
             use_container_width=True,
         )
@@ -2020,37 +2138,62 @@ with tab_straight:
 
 with tab_market:
     st.subheader("Market Analysis")
-    st.caption("Month-wise TAT bucket and % of overall by BGI Description, with Request Type filter.")
+    st.caption("Month-wise TAT bucket and % of overall by BGI Description.")
 
     market_base = completed_df[completed_df["net_tat_days"].notna()].copy()
     market_base["request_type_value"] = market_base["request_type_value"].astype("string").fillna("Unknown").replace("", "Unknown")
     market_base["bgi_desc_value"] = market_base["bgi_desc_value"].astype("string").fillna("Unknown").replace("", "Unknown")
 
-    request_type_options = ["All"] + sorted(market_base["request_type_value"].unique().tolist())
-    selected_request_type = st.selectbox(
-        "Request Type filter (requestTypeDescription)",
-        request_type_options,
-        key="market_request_type_filter",
-    )
-    if selected_request_type != "All":
-        market_base = market_base[market_base["request_type_value"] == selected_request_type].copy()
-
     if market_base.empty:
-        st.info("No completed cases with valid TAT for the selected request type.")
+        st.info("No completed cases with valid TAT for market analysis.")
     else:
+        st.markdown("### Average Net TAT by BGI Description (Top 15 by Avg TAT)")
+        bgi_avg = (
+            market_base.groupby("bgi_desc_value", as_index=False)
+            .agg(
+                cases=("request_id", "size"),
+                avg_tat_days=("net_tat_days", "mean"),
+                p90_tat_days=("net_tat_days", lambda s: s.quantile(0.9) if s.notna().any() else np.nan),
+            )
+            .sort_values(["avg_tat_days", "cases"], ascending=[False, False])
+        )
+        bgi_avg["share_pct"] = bgi_avg["cases"].apply(lambda x: pct_value(x, len(market_base)))
+
+        top_bgi_avg = bgi_avg.head(15).sort_values("avg_tat_days", ascending=True)
+        fig_bgi_avg = px.bar(
+            top_bgi_avg,
+            x="avg_tat_days",
+            y="bgi_desc_value",
+            orientation="h",
+            color="avg_tat_days",
+            color_continuous_scale="YlOrRd",
+            title="Average Net TAT by BGI Description (Top 15 by Avg TAT)",
+            hover_data={"cases": ":,.0f", "share_pct": ":.2f", "p90_tat_days": ":.2f", "avg_tat_days": ":.2f"},
+        )
+        add_bar_labels(fig_bgi_avg, orientation="h", value_type="days")
+        fig_bgi_avg.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="BGI Description")
+        render_plotly_chart(fig_bgi_avg, use_container_width=True)
+
+        render_dataframe(
+            bgi_avg.style.format(
+                {
+                    "cases": "{:,.0f}",
+                    "share_pct": "{:.2f}%",
+                    "avg_tat_days": "{:.2f}",
+                    "p90_tat_days": "{:.2f}",
+                },
+                na_rep="NA",
+            ),
+            use_container_width=True,
+        )
+
+        st.markdown("---")
         m1, m2 = st.columns(2)
         with m1:
-            bgi_options = ["All"] + sorted(market_base["bgi_desc_value"].unique().tolist())
-            selected_bgi = st.selectbox("BGI Description focus for month-wise TAT bucket", bgi_options, key="market_bgi_focus")
-            if selected_bgi == "All":
-                tat_scope = market_base.copy()
-            else:
-                tat_scope = market_base[market_base["bgi_desc_value"] == selected_bgi].copy()
-
             make_bucket_month_bar(
-                tat_scope,
+                market_base,
                 bucket_col="tat_bucket",
-                title=f"Month-wise TAT Bucket (%) - BGI: {selected_bgi}",
+                title="Month-wise TAT Bucket (%) - All BGI",
                 color_map=TAT_BUCKET_COLORS,
                 category_order=TAT_BUCKET_ORDER,
             )
@@ -2224,7 +2367,7 @@ with tab_market:
                     "tat_5_plus_pct",
                     "flag",
                 ]
-                st.dataframe(
+                render_dataframe(
                     bgi_top_month[show_cols].style.format(
                         {
                             "cases": "{:,.0f}",
@@ -2238,46 +2381,6 @@ with tab_market:
                     ),
                     use_container_width=True,
                 )
-
-        st.markdown("### Average TAT by BGI Description")
-        bgi_avg = (
-            market_base.groupby("bgi_desc_value", as_index=False)
-            .agg(
-                cases=("request_id", "size"),
-                avg_tat_days=("net_tat_days", "mean"),
-                p90_tat_days=("net_tat_days", lambda s: s.quantile(0.9) if s.notna().any() else np.nan),
-            )
-            .sort_values(["avg_tat_days", "cases"], ascending=[False, False])
-        )
-        bgi_avg["share_pct"] = bgi_avg["cases"].apply(lambda x: pct_value(x, len(market_base)))
-
-        top_bgi_avg = bgi_avg.head(15).sort_values("avg_tat_days", ascending=True)
-        fig_bgi_avg = px.bar(
-            top_bgi_avg,
-            x="avg_tat_days",
-            y="bgi_desc_value",
-            orientation="h",
-            color="avg_tat_days",
-            color_continuous_scale="YlOrRd",
-            title="Average Net TAT by BGI Description (Top 15 by Avg TAT)",
-            hover_data={"cases": ":,.0f", "share_pct": ":.2f", "p90_tat_days": ":.2f", "avg_tat_days": ":.2f"},
-        )
-        add_bar_labels(fig_bgi_avg, orientation="h", value_type="days")
-        fig_bgi_avg.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="BGI Description")
-        render_plotly_chart(fig_bgi_avg, use_container_width=True)
-
-        st.dataframe(
-            bgi_avg.style.format(
-                {
-                    "cases": "{:,.0f}",
-                    "share_pct": "{:.2f}%",
-                    "avg_tat_days": "{:.2f}",
-                    "p90_tat_days": "{:.2f}",
-                },
-                na_rep="NA",
-            ),
-            use_container_width=True,
-        )
 
 with tab_reson:
     st.subheader("Reason")
@@ -2331,7 +2434,7 @@ with tab_reson:
                 fig.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title=y_label)
                 render_plotly_chart(fig, use_container_width=True)
             with c2:
-                st.dataframe(
+                render_dataframe(
                     summary[["data_point", "cases", "share_pct", "avg_tat_days"]].style.format(
                         {"cases": "{:,.0f}", "share_pct": "{:.2f}%", "avg_tat_days": "{:.2f}"},
                         na_rep="NA",
@@ -2443,7 +2546,7 @@ with tab_data:
 
     if profile_rows:
         profile_df = pd.DataFrame(profile_rows)
-        st.dataframe(
+        render_dataframe(
             profile_df.style.format({"distinct_values": "{:,.0f}", "missing_pct": "{:.2f}%"}),
             use_container_width=True,
         )
@@ -2476,7 +2579,7 @@ with tab_data:
         "create_month",
     ]
     available_cols = [c for c in show_cols if c in filtered.columns]
-    st.dataframe(filtered[available_cols].head(500), use_container_width=True)
+    render_dataframe(filtered[available_cols].head(500), use_container_width=True)
 
 st.caption(
     "Definitions: Completed = completedDateTime present; StraightThrough = onHoldReasonDescriptionsHistory empty; "
