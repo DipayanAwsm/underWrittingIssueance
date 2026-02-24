@@ -768,14 +768,14 @@ with tab_cycle:
     else:
         fig_overall_tat_box = px.box(
             overall_tat,
-            y="net_tat_days",
+            x="net_tat_days",
             points="outliers",
             title="Overall Snapshot - Net TAT Distribution (Box Plot)",
             color_discrete_sequence=["#1f77b4"],
         )
         fig_overall_tat_box.update_layout(
-            xaxis_title="",
-            yaxis_title="Net TAT (days)",
+            xaxis_title="Net TAT (days)",
+            yaxis_title="",
             showlegend=False,
         )
         render_plotly_chart(fig_overall_tat_box, use_container_width=True)
