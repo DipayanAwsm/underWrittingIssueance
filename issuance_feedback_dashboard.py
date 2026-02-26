@@ -14,14 +14,17 @@ st.set_page_config(page_title="Auto Issuance Feedback Dashboard", layout="wide")
 st.markdown(
     """
     <style>
-    div[data-baseweb="tab-list"] {
-        position: sticky;
-        top: 0;
-        z-index: 1000;
-        background: white;
-        border-bottom: 1px solid rgba(49, 51, 63, 0.2);
-        padding-top: 0.2rem;
-        padding-bottom: 0.2rem;
+    div[data-testid="stTabs"] div[data-baseweb="tab-list"],
+    div[data-testid="stTabs"] [role="tablist"] {
+        position: sticky !important;
+        position: -webkit-sticky !important;
+        top: 0 !important;
+        z-index: 1002 !important;
+        background: rgba(255, 255, 255, 0.98) !important;
+        border-bottom: 1px solid rgba(49, 51, 63, 0.2) !important;
+        padding-top: 0.2rem !important;
+        padding-bottom: 0.2rem !important;
+        backdrop-filter: blur(2px);
     }
     </style>
     """,
@@ -618,7 +621,6 @@ def make_bucket_month_bar(
 
 
 st.title("Auto Issuance Speed to Market – Business Intelligence Prescriptive")
-st.caption("Fresh version focused on overall completion, open, and straight-through views.")
 
 st.sidebar.header("Input")
 uploaded = st.sidebar.file_uploader("Upload file (.csv/.xlsx/.xls)", type=["csv", "xlsx", "xls"])
@@ -652,10 +654,6 @@ if raw_df.empty:
     st.stop()
 
 df, metadata = prepare_data(raw_df)
-
-with st.expander("Detected columns and source"):
-    st.write({"source": source, **metadata})
-    render_dataframe(df.head(10), use_container_width=True)
 
 st.sidebar.header("Global Filter")
 SHOW_CALC_DETAILS = st.sidebar.checkbox(
@@ -721,21 +719,6 @@ if not all_request_type:
 if filtered.empty:
     st.warning("No rows available after filters.")
     st.stop()
-
-if SHOW_CALC_DETAILS:
-    with st.expander("Calculation Dictionary (applies to all visuals)", expanded=False):
-        st.markdown("- Completed cases: `completedDateTime` is valid/present.")
-        st.markdown("- Open cases: `completedDateTime` is null/empty.")
-        st.markdown("- Total hold days: sum of valid `(offHoldDatesHistory[i] - onHoldDatesHistory[i])` in days.")
-        st.markdown("- Missing `offHoldDatesHistory[i]` is treated as no hold for that index.")
-        st.markdown("- Straight Through: `hold_reason_count == 0`.")
-        st.markdown("- Multi Hold: `hold_reason_count >= 1`.")
-        st.markdown("- Touches: `hold_reason_count + 1`.")
-        st.markdown("- Gross TAT (days): `(completedDateTime - createDateTime)`.")
-        st.markdown("- Net TAT (days): `Gross TAT - total_hold_days`.")
-        st.markdown("- TAT buckets: `1-4`, `5-7`, `7+` days.")
-        st.markdown("- Percent values: `(numerator / denominator) * 100`.")
-        st.markdown("- P50: `quantile(0.5)`, P90: `quantile(0.9)`.")
 
 total_cases = len(filtered)
 completed_df = filtered[filtered["is_completed"]].copy()
@@ -813,14 +796,14 @@ with tab_cycle:
     st.subheader("2) Completed Cases")
     completed_tat = completed_df[completed_df["net_tat_days"].notna()].copy()
     if not completed_tat.empty:
-        p50_all = completed_tat["net_tat_days"].quantile(0.5)
+        avg_all = completed_tat["net_tat_days"].mean()
         p90_all = completed_tat["net_tat_days"].quantile(0.9)
     c2_left, c2_right = st.columns(2)
     with c2_left:
         if completed_tat.empty:
             st.info("No completed cases with valid TAT for bucket chart.")
         else:
-            st.metric("Median Days of Issuance (P50)", f"{p50_all:.2f} days")
+            st.metric("Average Days of Issuance", f"{avg_all:.2f} days")
             make_bucket_month_bar(
                 completed_tat,
                 bucket_col="tat_bucket",
