@@ -505,11 +505,81 @@ def render_calc_note(lines: List[str], label_prefix: str) -> None:
     st.markdown("\n".join([f"- {line}" for line in lines]))
 
 
+def _format_label_value(val: object) -> str:
+    try:
+        if val is None or pd.isna(val):
+            return ""
+    except Exception:
+        pass
+    try:
+        fval = float(val)
+        if np.isfinite(fval):
+            if abs(fval - round(fval)) < 1e-9:
+                return f"{fval:,.0f}"
+            return f"{fval:,.2f}"
+    except Exception:
+        return str(val)
+    return str(val)
+
+
+def apply_auto_data_labels(fig: object) -> None:
+    try:
+        for trace in fig.data:
+            t = str(getattr(trace, "type", "")).lower()
+
+            if t == "bar":
+                texttemplate = getattr(trace, "texttemplate", None)
+                text = getattr(trace, "text", None)
+                if texttemplate:
+                    continue
+                has_text = text is not None and len(text) > 0
+                if has_text:
+                    continue
+                orientation = str(getattr(trace, "orientation", "v")).lower()
+                values = list(getattr(trace, "x", [])) if orientation == "h" else list(getattr(trace, "y", []))
+                labels = [_format_label_value(v) for v in values]
+                trace.update(text=labels, textposition="inside", cliponaxis=False)
+                continue
+
+            if t in {"scatter", "scattergl"}:
+                x_vals = list(getattr(trace, "x", []))
+                y_vals = list(getattr(trace, "y", []))
+                if not x_vals and not y_vals:
+                    continue
+                if len(x_vals) == 1 and len(y_vals) == 1 and x_vals[0] is None and y_vals[0] is None:
+                    # Skip dummy scatter traces used only for legend text.
+                    continue
+                mode = str(getattr(trace, "mode", "") or "")
+                if "text" not in mode:
+                    mode = f"{mode}+text" if mode else "markers+text"
+                text = getattr(trace, "text", None)
+                if text is None or len(text) == 0:
+                    values = y_vals if y_vals else x_vals
+                    text = [_format_label_value(v) for v in values]
+                trace.update(mode=mode, text=text, textposition="top center")
+                continue
+
+            if t == "pie":
+                texttemplate = getattr(trace, "texttemplate", None)
+                textinfo = str(getattr(trace, "textinfo", "") or "")
+                if not texttemplate and (not textinfo or textinfo == "none"):
+                    trace.update(textinfo="label+percent+value")
+                continue
+
+            if t == "box":
+                trace.update(boxmean=True)
+                continue
+    except Exception:
+        # Keep dashboard rendering even if a trace type does not support label updates.
+        return
+
+
 def render_plotly_chart(fig: object, **kwargs) -> None:
     global _plotly_chart_counter
     if "key" not in kwargs or kwargs["key"] is None:
         _plotly_chart_counter += 1
         kwargs["key"] = f"plotly_{_plotly_chart_counter}"
+    apply_auto_data_labels(fig)
     st.plotly_chart(fig, **kwargs)
     title_text = ""
     try:
@@ -788,6 +858,13 @@ with tab_cycle:
             xaxis_title="Net TAT (days)",
             yaxis_title="",
             legend_title="TAT Stats",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+            ),
             showlegend=True,
         )
         render_plotly_chart(fig_overall_tat_box, use_container_width=True)
@@ -849,128 +926,7 @@ with tab_cycle:
             render_plotly_chart(fig_p, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("3) Open Cases")
-    open_work = open_df.copy()
-    open_work["case_type"] = np.where(open_work["hold_reason_count"] >= 1, "Multi Hold", "Straight Through")
-    open_work["touches"] = open_work["hold_reason_count"].fillna(0).astype(float) + 1.0
-    case_type_order = ["Straight Through", "Multi Hold"]
-    case_type_colors = {"Straight Through": "#2ca02c", "Multi Hold": "#d62728"}
-    if open_work.empty:
-        st.info("No open cases available for straight-through vs multi-hold split.")
-    else:
-        straight_median_tat = completed_straight_df["net_tat_days"].median() if not completed_straight_df.empty else np.nan
-        multi_tat_source = multi_hold_completed_df[multi_hold_completed_df["net_tat_days"].notna()].copy()
-        multi_median_tat = multi_tat_source["net_tat_days"].median() if not multi_tat_source.empty else np.nan
-
-        split_counts = (
-            open_work["case_type"]
-            .value_counts()
-            .reindex(case_type_order, fill_value=0)
-            .rename_axis("case_type")
-            .reset_index(name="cases")
-        )
-        split_counts["median_tat_days"] = np.where(
-            split_counts["case_type"] == "Straight Through",
-            straight_median_tat,
-            multi_median_tat,
-        )
-        split_counts["median_tat_text"] = split_counts["median_tat_days"].apply(
-            lambda x: f"{x:.2f} days" if pd.notna(x) else "NA"
-        )
-        custom_data = np.stack([split_counts["median_tat_text"]], axis=-1)
-
-        fig_open_split = go.Figure(
-            data=[
-                go.Pie(
-                    labels=split_counts["case_type"],
-                    values=split_counts["cases"],
-                    customdata=custom_data,
-                    marker=dict(
-                        colors=[case_type_colors.get(label, "#636EFA") for label in split_counts["case_type"]]
-                    ),
-                    texttemplate="%{label}<br>%{percent}<br>Median TAT: %{customdata[0]}",
-                    hovertemplate=(
-                        "<b>%{label}</b><br>"
-                        "Cases: %{value:,.0f}<br>"
-                        "Share: %{percent}<br>"
-                        "Median TAT: %{customdata[0]}<extra></extra>"
-                    ),
-                )
-            ]
-        )
-        fig_open_split.update_layout(title="Open Cases - Straight Through vs Multi Hold (with Median TAT)")
-        render_plotly_chart(fig_open_split, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("4) Open Case Average Days and Average Touches")
-    o3, o4 = st.columns(2)
-    with o3:
-        avg_open_days = (
-            open_work[open_work["open_days"].notna()]
-            .groupby("case_type", as_index=False)
-            .agg(
-                avg_open_days=("open_days", "mean"),
-                cases=("request_id", "size"),
-            )
-        )
-        if avg_open_days.empty:
-            st.info("No valid open-day values to calculate average by case type.")
-        else:
-            avg_open_days["case_type"] = pd.Categorical(
-                avg_open_days["case_type"], categories=case_type_order, ordered=True
-            )
-            avg_open_days = avg_open_days.sort_values("case_type")
-            fig_open_median = px.bar(
-                avg_open_days,
-                x="case_type",
-                y="avg_open_days",
-                text="avg_open_days",
-                color="case_type",
-                color_discrete_map=case_type_colors,
-                title="Average Open Days by Case Type",
-                hover_data={"cases": ":,.0f", "avg_open_days": ":.2f"},
-            )
-            add_bar_labels(fig_open_median, orientation="v", value_type="days", use_text_field=True)
-            fig_open_median.update_layout(
-                xaxis_title="Case Type",
-                yaxis_title="Average Open Days",
-                showlegend=False,
-            )
-            render_plotly_chart(fig_open_median, use_container_width=True)
-
-    with o4:
-        avg_touches = (
-            open_work.groupby("case_type", as_index=False)
-            .agg(
-                avg_touches=("touches", "mean"),
-                cases=("request_id", "size"),
-            )
-        )
-        if avg_touches.empty:
-            st.info("No open case data available for touches analysis.")
-        else:
-            avg_touches["case_type"] = pd.Categorical(avg_touches["case_type"], categories=case_type_order, ordered=True)
-            avg_touches = avg_touches.sort_values("case_type")
-            fig_touches = px.bar(
-                avg_touches,
-                x="case_type",
-                y="avg_touches",
-                text="avg_touches",
-                color="case_type",
-                color_discrete_map=case_type_colors,
-                title="Average Number of Touches by Case Type",
-                hover_data={"cases": ":,.0f", "avg_touches": ":.2f"},
-            )
-            add_bar_labels(fig_touches, orientation="v", value_type="days", use_text_field=True)
-            fig_touches.update_layout(
-                xaxis_title="Case Type",
-                yaxis_title="Average Touches",
-                showlegend=False,
-            )
-            render_plotly_chart(fig_touches, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("5) StraightThrough Cases")
+    st.subheader("3) StraightThrough Cases")
     s1, s2 = st.columns(2)
     straight_tat_source = completed_straight_df[completed_straight_df["net_tat_days"].notna()].copy()
     with s1:
