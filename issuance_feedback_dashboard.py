@@ -667,18 +667,23 @@ filtered = df.copy()
 if filtered["create_month_dt"].notna().any():
     month_starts = sorted(pd.to_datetime(filtered["create_month_dt"].dropna().unique()))
     month_labels = [m.strftime("%Y-%m") for m in month_starts]
-    label_to_month = {lab: m for lab, m in zip(month_labels, month_starts)}
-    if len(month_labels) == 1:
-        st.sidebar.caption(f"Create month: {month_labels[0]}")
-    else:
-        selected = st.sidebar.select_slider(
-            "Create month range",
-            options=month_labels,
-            value=(month_labels[0], month_labels[-1]),
+    st.sidebar.markdown("**Create Month Filter**")
+    all_months = st.sidebar.checkbox("All months", value=True, key="global_month_all")
+    selected_months: List[str] = []
+    for idx, month_label in enumerate(month_labels):
+        checked = st.sidebar.checkbox(
+            month_label,
+            value=all_months,
+            key=f"global_month_option_{idx}_{normalize_name(month_label)}",
         )
-        start_month = label_to_month[selected[0]]
-        end_month = label_to_month[selected[1]] + pd.offsets.MonthEnd(1) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        filtered = filtered[filtered["create_dt"].between(start_month, end_month, inclusive="both")]
+        if checked:
+            selected_months.append(month_label)
+
+    if not all_months:
+        if selected_months:
+            filtered = filtered[filtered["create_month"].astype(str).isin(selected_months)]
+        else:
+            filtered = filtered.iloc[0:0]
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Request Type Filter (requestTypeDescription)**")
@@ -766,6 +771,16 @@ with tab_cycle:
     if overall_tat.empty:
         st.info("No completed cases with valid Net TAT available for overall TAT box plot.")
     else:
+        tat_series = overall_tat["net_tat_days"].dropna()
+        tat_stats = {
+            "Min": float(tat_series.min()),
+            "Q1 (P25)": float(tat_series.quantile(0.25)),
+            "Median (P50)": float(tat_series.quantile(0.5)),
+            "Q3 (P75)": float(tat_series.quantile(0.75)),
+            "P90": float(tat_series.quantile(0.9)),
+            "Mean": float(tat_series.mean()),
+            "Max": float(tat_series.max()),
+        }
         fig_overall_tat_box = px.box(
             overall_tat,
             x="net_tat_days",
@@ -773,10 +788,24 @@ with tab_cycle:
             title="Overall Snapshot - Net TAT Distribution (Box Plot)",
             color_discrete_sequence=["#1f77b4"],
         )
+        fig_overall_tat_box.update_traces(name="Net TAT", showlegend=True)
+        for label, value in tat_stats.items():
+            fig_overall_tat_box.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="markers",
+                    marker=dict(size=0, opacity=0),
+                    showlegend=True,
+                    name=f"{label}: {value:.2f} days",
+                    hoverinfo="skip",
+                )
+            )
         fig_overall_tat_box.update_layout(
             xaxis_title="Net TAT (days)",
             yaxis_title="",
-            showlegend=False,
+            legend_title="TAT Stats",
+            showlegend=True,
         )
         render_plotly_chart(fig_overall_tat_box, use_container_width=True)
 
@@ -890,38 +919,38 @@ with tab_cycle:
         render_plotly_chart(fig_open_split, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("4) Open Case Median Days and Average Touches")
+    st.subheader("4) Open Case Average Days and Average Touches")
     o3, o4 = st.columns(2)
     with o3:
-        median_open_days = (
+        avg_open_days = (
             open_work[open_work["open_days"].notna()]
             .groupby("case_type", as_index=False)
             .agg(
-                median_open_days=("open_days", "median"),
+                avg_open_days=("open_days", "mean"),
                 cases=("request_id", "size"),
             )
         )
-        if median_open_days.empty:
-            st.info("No valid open-day values to calculate median by case type.")
+        if avg_open_days.empty:
+            st.info("No valid open-day values to calculate average by case type.")
         else:
-            median_open_days["case_type"] = pd.Categorical(
-                median_open_days["case_type"], categories=case_type_order, ordered=True
+            avg_open_days["case_type"] = pd.Categorical(
+                avg_open_days["case_type"], categories=case_type_order, ordered=True
             )
-            median_open_days = median_open_days.sort_values("case_type")
+            avg_open_days = avg_open_days.sort_values("case_type")
             fig_open_median = px.bar(
-                median_open_days,
+                avg_open_days,
                 x="case_type",
-                y="median_open_days",
-                text="median_open_days",
+                y="avg_open_days",
+                text="avg_open_days",
                 color="case_type",
                 color_discrete_map=case_type_colors,
-                title="Median Open Days by Case Type",
-                hover_data={"cases": ":,.0f", "median_open_days": ":.2f"},
+                title="Average Open Days by Case Type",
+                hover_data={"cases": ":,.0f", "avg_open_days": ":.2f"},
             )
             add_bar_labels(fig_open_median, orientation="v", value_type="days", use_text_field=True)
             fig_open_median.update_layout(
                 xaxis_title="Case Type",
-                yaxis_title="Median Open Days",
+                yaxis_title="Average Open Days",
                 showlegend=False,
             )
             render_plotly_chart(fig_open_median, use_container_width=True)
@@ -1587,35 +1616,10 @@ with tab_agent:
             render_dataframe(styled, use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 0) Month-wise Average TAT and Top 5 Highest TAT Handlers")
-        st.caption("Uses the minimum handled cases filter above.")
+        st.markdown("### 0) Average TAT by Broker and Analyst (Top 10)")
+        st.caption("Uses completed cases with valid Net TAT and a minimum handled-case threshold of 10.")
 
-        def monthly_avg_tat_for_role(
-            source_df: pd.DataFrame, person_col: str, min_cases: int, top_n_people: int
-        ) -> pd.DataFrame:
-            work = source_df[source_df["create_month"].notna() & (source_df["create_month"] != "NaT")].copy()
-            if work.empty:
-                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
-            work[person_col] = work[person_col].astype("string").fillna("Unknown").replace("", "Unknown")
-            work = work[work[person_col] != "Unknown"]
-            if work.empty:
-                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
-
-            person_counts = work[person_col].value_counts()
-            eligible_people = person_counts[person_counts >= min_cases].head(top_n_people).index.tolist()
-            if not eligible_people:
-                return pd.DataFrame(columns=["create_month", "person", "cases", "avg_tat_days"])
-
-            work = work[work[person_col].isin(eligible_people)].copy()
-            out = (
-                work.groupby(["create_month", person_col], as_index=False)
-                .agg(cases=("request_id", "size"), avg_tat_days=("net_tat_days", "mean"))
-                .rename(columns={person_col: "person"})
-                .sort_values("create_month")
-            )
-            return out
-
-        def top5_people_high_tat(source_df: pd.DataFrame, person_col: str, min_cases: int) -> pd.DataFrame:
+        def top_people_high_tat(source_df: pd.DataFrame, person_col: str, min_cases: int, top_n: int) -> pd.DataFrame:
             work = source_df.copy()
             work[person_col] = work[person_col].astype("string").fillna("Unknown").replace("", "Unknown")
             work = work[work[person_col] != "Unknown"]
@@ -1634,7 +1638,7 @@ with tab_agent:
             out = out[out["cases"] >= min_cases].copy()
             if out.empty:
                 return pd.DataFrame(columns=["person", "cases", "avg_tat_days", "p90_tat_days"])
-            return out.sort_values(["avg_tat_days", "p90_tat_days", "cases"], ascending=[False, False, False]).head(5)
+            return out.sort_values(["avg_tat_days", "p90_tat_days", "cases"], ascending=[False, False, False]).head(top_n)
 
         def top_reason_sets_for_people(source_df: pd.DataFrame, person_col: str, top_people: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
             if not top_people:
@@ -1668,57 +1672,13 @@ with tab_agent:
             reason_top["share_pct"] = reason_top["cases"].apply(lambda x: pct_value(x, max(len(subset), 1)))
             return hold_top, reason_top
 
-        people_top_n = st.slider(
-            "People shown in month-wise average TAT trend (per role)",
-            min_value=3,
-            max_value=15,
-            value=8,
-            step=1,
-            key="people_monthwise_top_n",
-        )
-
-        analyst_monthly = monthly_avg_tat_for_role(people_focus, "account_analyst_value", int(min_cases_people), int(people_top_n))
-        broker_monthly = monthly_avg_tat_for_role(people_focus, "agent_broker_value", int(min_cases_people), int(people_top_n))
-
-        g1, g2 = st.columns(2)
-        with g1:
-            if broker_monthly.empty:
-                st.info("No eligible broker month-wise average TAT points.")
-            else:
-                fig_broker_month = px.line(
-                    broker_monthly,
-                    x="create_month",
-                    y="avg_tat_days",
-                    color="person",
-                    markers=True,
-                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f"},
-                    title="Broker - Month-wise Average TAT",
-                )
-                fig_broker_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)", legend_title="Broker")
-                render_plotly_chart(fig_broker_month, use_container_width=True)
-        with g2:
-            if analyst_monthly.empty:
-                st.info("No eligible analyst month-wise average TAT points.")
-            else:
-                fig_analyst_month = px.line(
-                    analyst_monthly,
-                    x="create_month",
-                    y="avg_tat_days",
-                    color="person",
-                    markers=True,
-                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f"},
-                    title="Analyst - Month-wise Average TAT",
-                )
-                fig_analyst_month.update_layout(xaxis_title="Create Month", yaxis_title="Avg Net TAT (days)", legend_title="Analyst")
-                render_plotly_chart(fig_analyst_month, use_container_width=True)
-
-        top_brokers = top5_people_high_tat(people_focus, "agent_broker_value", int(min_cases_people))
-        top_analysts = top5_people_high_tat(people_focus, "account_analyst_value", int(min_cases_people))
+        top_brokers = top_people_high_tat(people_focus, "agent_broker_value", int(min_cases_people), top_n=10)
+        top_analysts = top_people_high_tat(people_focus, "account_analyst_value", int(min_cases_people), top_n=10)
 
         t1, t2 = st.columns(2)
         with t1:
             if top_brokers.empty:
-                st.info("No broker meets the minimum handled case filter for Top 5 highest TAT.")
+                st.info("No broker meets the minimum handled case filter for Top 10 average TAT.")
             else:
                 fig_top_broker = px.bar(
                     top_brokers.sort_values("avg_tat_days", ascending=True),
@@ -1726,7 +1686,7 @@ with tab_agent:
                     y="person",
                     orientation="h",
                     text="avg_tat_days",
-                    title="Top 5 Brokers Taking Most TAT to Complete",
+                    title="Average TAT by Broker (Top 10)",
                     hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
                     color_discrete_sequence=["#d62728"],
                 )
@@ -1735,7 +1695,7 @@ with tab_agent:
                 render_plotly_chart(fig_top_broker, use_container_width=True)
         with t2:
             if top_analysts.empty:
-                st.info("No analyst meets the minimum handled case filter for Top 5 highest TAT.")
+                st.info("No analyst meets the minimum handled case filter for Top 10 average TAT.")
             else:
                 fig_top_analyst = px.bar(
                     top_analysts.sort_values("avg_tat_days", ascending=True),
@@ -1743,7 +1703,7 @@ with tab_agent:
                     y="person",
                     orientation="h",
                     text="avg_tat_days",
-                    title="Top 5 Analysts Taking Most TAT to Complete",
+                    title="Average TAT by Analyst (Top 10)",
                     hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
                     color_discrete_sequence=["#ff7f0e"],
                 )
@@ -2188,8 +2148,51 @@ with tab_market:
         )
 
         st.markdown("---")
-        m1, m2 = st.columns(2)
+        st.markdown("### BGI and TAT Bucket Views")
+        m1, m2, m3 = st.columns(3)
         with m1:
+            bgi_bucket_scope = market_base.copy()
+            bgi_bucket_scope["tat_bucket_str"] = bgi_bucket_scope["tat_bucket"].astype("string")
+            bgi_bucket_scope = bgi_bucket_scope[bgi_bucket_scope["tat_bucket_str"].isin(TAT_BUCKET_ORDER)]
+            if bgi_bucket_scope.empty:
+                st.info("No valid TAT bucket values available for BGI by TAT bucket graph.")
+            else:
+                top_bgi_bucket = bgi_bucket_scope["bgi_desc_value"].value_counts().head(10).index.tolist()
+                bgi_bucket_scope["bgi_plot"] = bgi_bucket_scope["bgi_desc_value"].where(
+                    bgi_bucket_scope["bgi_desc_value"].isin(top_bgi_bucket),
+                    "Other",
+                )
+                bgi_bucket_mix = (
+                    bgi_bucket_scope.groupby(["bgi_plot", "tat_bucket_str"], as_index=False)
+                    .agg(cases=("request_id", "size"))
+                )
+                bgi_bucket_mix["bgi_total"] = bgi_bucket_mix.groupby("bgi_plot")["cases"].transform("sum")
+                bgi_bucket_mix["share_pct"] = bgi_bucket_mix.apply(
+                    lambda r: pct_value(r["cases"], r["bgi_total"]),
+                    axis=1,
+                )
+                bgi_order = top_bgi_bucket + (["Other"] if "Other" in bgi_bucket_mix["bgi_plot"].unique() else [])
+                fig_bgi_bucket = px.bar(
+                    bgi_bucket_mix,
+                    x="bgi_plot",
+                    y="share_pct",
+                    color="tat_bucket_str",
+                    text="share_pct",
+                    barmode="stack",
+                    category_orders={"tat_bucket_str": TAT_BUCKET_ORDER, "bgi_plot": bgi_order},
+                    color_discrete_map=TAT_BUCKET_COLORS,
+                    title="BGI by TAT Bucket (%)",
+                    hover_data={"cases": ":,.0f", "bgi_total": ":,.0f", "share_pct": ":.2f"},
+                )
+                add_bar_labels(fig_bgi_bucket, orientation="v", value_type="percent", use_text_field=True, text_as_percent=True)
+                fig_bgi_bucket.update_layout(
+                    xaxis_title="BGI Description",
+                    yaxis_title="Share within BGI (%)",
+                    legend_title="TAT Bucket",
+                )
+                render_plotly_chart(fig_bgi_bucket, use_container_width=True)
+
+        with m2:
             make_bucket_month_bar(
                 market_base,
                 bucket_col="tat_bucket",
@@ -2198,7 +2201,7 @@ with tab_market:
                 category_order=TAT_BUCKET_ORDER,
             )
 
-        with m2:
+        with m3:
             bgi_month = market_base[
                 market_base["create_month"].notna() & (market_base["create_month"] != "NaT")
             ].copy()
