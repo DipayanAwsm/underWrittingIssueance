@@ -1,6 +1,9 @@
 import io
 import re
+import smtplib
+import ssl
 from pathlib import Path
+from email.message import EmailMessage
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -606,6 +609,244 @@ def render_dataframe(data: object, **kwargs) -> None:
         )
 
 
+def build_prescriptive_recommendations(
+    filtered_df: pd.DataFrame,
+    completed_df: pd.DataFrame,
+    open_df: pd.DataFrame,
+    hold_reason_col: Optional[str],
+) -> pd.DataFrame:
+    completed_valid = completed_df[completed_df["net_tat_days"].notna()].copy()
+    long_tat = completed_valid[completed_valid["net_tat_days"] > 7].copy()
+    recommendations: List[Dict[str, str]] = []
+
+    def add_rec(
+        focus_area: str,
+        recommendation: str,
+        metric_snapshot: str,
+        expected_impact: str,
+        hold_reason: str = "NA",
+    ) -> None:
+        recommendations.append(
+            {
+                "priority": len(recommendations) + 1,
+                "focus_area": focus_area,
+                "hold_reason": hold_reason,
+                "recommendation": recommendation,
+                "metric_snapshot": metric_snapshot,
+                "expected_impact": expected_impact,
+            }
+        )
+
+    if completed_valid.empty:
+        add_rec(
+            "Data quality",
+            "Ensure completedDateTime and createDateTime are populated for all completed cases.",
+            "No completed cases with valid Net TAT found after filters.",
+            "Unlocks reliable TAT diagnostics and action tracking.",
+            hold_reason="NA",
+        )
+    else:
+        # 1) Top hold reason in long-TAT cases
+        hold_events_long = explode_hold_reasons(long_tat, hold_reason_col)
+        primary_hold_reason = "Unspecified"
+        if not hold_events_long.empty:
+            top_hold = hold_events_long["hold_reason_short"].value_counts().head(1)
+            hold_reason = str(top_hold.index[0])
+            primary_hold_reason = hold_reason
+            hold_cases = int(top_hold.iloc[0])
+            hold_share = pct_value(hold_cases, max(len(long_tat), 1))
+            add_rec(
+                f"Hold reason: {hold_reason}",
+                "Create a targeted pre-check and fast-track SOP for this hold reason.",
+                f"{hold_share:.2f}% of >7-day cases include this hold reason ({hold_cases:,} cases).",
+                "Reduces repeated hold loops and long-tail completion time.",
+                hold_reason=hold_reason,
+            )
+        else:
+            add_rec(
+                "Hold reason hygiene",
+                "Improve hold reason capture quality and enforce standardized hold coding.",
+                "Hold reason history is sparse for long-TAT cases in current filter.",
+                "Better root-cause visibility for TAT reduction actions.",
+                hold_reason="Not Captured",
+            )
+
+        # 2) Request type pressure point
+        req_perf = (
+            completed_valid.groupby("request_type_value", as_index=False)
+            .agg(
+                cases=("request_id", "size"),
+                avg_tat_days=("net_tat_days", "mean"),
+                pct_7_plus=("net_tat_days", lambda s: float((s > 7).mean() * 100.0)),
+            )
+            .sort_values(["pct_7_plus", "avg_tat_days", "cases"], ascending=[False, False, False])
+        )
+        req_perf = req_perf[req_perf["cases"] >= 10].copy()
+        if not req_perf.empty:
+            r0 = req_perf.iloc[0]
+            add_rec(
+                f"Request type: {r0['request_type_value']}",
+                "Build request-type-specific checklists and early exception routing.",
+                f"Avg TAT: {float(r0['avg_tat_days']):.2f} days, 7+ TAT: {float(r0['pct_7_plus']):.2f}%, cases: {int(r0['cases']):,}.",
+                "Cuts preventable rework and speeds up high-friction request flows.",
+                hold_reason=primary_hold_reason,
+            )
+
+        # 3) BGI pressure point
+        bgi_perf = (
+            completed_valid.groupby("bgi_desc_value", as_index=False)
+            .agg(
+                cases=("request_id", "size"),
+                avg_tat_days=("net_tat_days", "mean"),
+                pct_7_plus=("net_tat_days", lambda s: float((s > 7).mean() * 100.0)),
+            )
+            .sort_values(["pct_7_plus", "avg_tat_days", "cases"], ascending=[False, False, False])
+        )
+        bgi_perf = bgi_perf[bgi_perf["cases"] >= 10].copy()
+        if not bgi_perf.empty:
+            b0 = bgi_perf.iloc[0]
+            add_rec(
+                f"BGI segment: {b0['bgi_desc_value']}",
+                "Launch a BGI-specific SLA playbook and daily aging review.",
+                f"Avg TAT: {float(b0['avg_tat_days']):.2f} days, 7+ TAT: {float(b0['pct_7_plus']):.2f}%, cases: {int(b0['cases']):,}.",
+                "Improves speed-to-market in the slowest BGI lane.",
+                hold_reason=primary_hold_reason,
+            )
+
+        # 4) Underwriter focus
+        uw_perf = (
+            completed_valid.groupby("underwriter_value", as_index=False)
+            .agg(
+                cases=("request_id", "size"),
+                avg_tat_days=("net_tat_days", "mean"),
+                p90_tat_days=("net_tat_days", lambda s: s.quantile(0.9) if s.notna().any() else np.nan),
+            )
+            .sort_values(["avg_tat_days", "p90_tat_days", "cases"], ascending=[False, False, False])
+        )
+        uw_perf = uw_perf[uw_perf["cases"] >= 10].copy()
+        if not uw_perf.empty:
+            u0 = uw_perf.iloc[0]
+            add_rec(
+                f"Underwriter: {u0['underwriter_value']}",
+                "Set weekly coaching with root-cause review and WIP limits for this underwriter queue.",
+                f"Avg TAT: {float(u0['avg_tat_days']):.2f} days, P90: {float(u0['p90_tat_days']):.2f}, cases: {int(u0['cases']):,}.",
+                "Reduces long-tail delays from high-variance individual queues.",
+                hold_reason=primary_hold_reason,
+            )
+
+        # 5) Multi-hold and open aging focus
+        multi_completed = completed_valid[completed_valid["hold_reason_count"] >= 1].copy()
+        multi_share = pct_value(len(multi_completed), max(len(completed_valid), 1))
+        avg_touches_multi = (multi_completed["hold_reason_count"].fillna(0).mean() + 1.0) if not multi_completed.empty else np.nan
+        open_7_plus = open_df[open_df["open_days"].notna() & (open_df["open_days"] > 7)].copy()
+        open_7_plus_share = pct_value(len(open_7_plus), max(len(open_df), 1))
+        add_rec(
+            "Multi-hold & open-case aging",
+            "Create a daily rescue queue for multi-hold and >7-day open cases with clear owner escalation.",
+            (
+                f"Multi-hold in completed: {multi_share:.2f}%"
+                + (f", avg touches: {float(avg_touches_multi):.2f}" if pd.notna(avg_touches_multi) else "")
+                + f"; open >7 days: {open_7_plus_share:.2f}%."
+            ),
+            "Directly attacks backlog leakage and repeat-touch cycle time.",
+            hold_reason=primary_hold_reason,
+        )
+
+    # Ensure exactly top 5 recommendations
+    out = pd.DataFrame(recommendations).head(5)
+    return out
+
+
+def build_report_text(
+    recommendations_df: pd.DataFrame,
+    total_cases: int,
+    completed_df: pd.DataFrame,
+    open_df: pd.DataFrame,
+) -> str:
+    completed_valid = completed_df[completed_df["net_tat_days"].notna()].copy()
+    avg_tat = float(completed_valid["net_tat_days"].mean()) if not completed_valid.empty else np.nan
+    p90_tat = float(completed_valid["net_tat_days"].quantile(0.9)) if not completed_valid.empty else np.nan
+    long_tat_share = pct_value((completed_valid["net_tat_days"] > 7).sum(), max(len(completed_valid), 1)) if not completed_valid.empty else np.nan
+    open_share = pct_value(len(open_df), max(total_cases, 1))
+
+    lines = [
+        "Auto Issuance Prescriptive TAT Report",
+        f"Generated at: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "Snapshot:",
+        f"- Total cases: {total_cases:,}",
+        f"- Completed cases: {len(completed_df):,}",
+        f"- Open cases: {len(open_df):,} ({open_share:.2f}%)",
+        f"- Avg Net TAT (completed valid): {avg_tat:.2f} days" if pd.notna(avg_tat) else "- Avg Net TAT (completed valid): NA",
+        f"- P90 Net TAT (completed valid): {p90_tat:.2f} days" if pd.notna(p90_tat) else "- P90 Net TAT (completed valid): NA",
+        f"- % completed with Net TAT > 7 days: {long_tat_share:.2f}%" if pd.notna(long_tat_share) else "- % completed with Net TAT > 7 days: NA",
+        "",
+        "Top 5 Prescriptive Recommendations:",
+    ]
+
+    if recommendations_df.empty:
+        lines.append("- No recommendation rows available for the current filter.")
+    else:
+        for _, row in recommendations_df.iterrows():
+            lines += [
+                f"{int(row['priority'])}. Focus area: {row['focus_area']}",
+                f"   Hold reason: {row.get('hold_reason', 'NA')}",
+                f"   Recommendation: {row['recommendation']}",
+                f"   Metric snapshot: {row['metric_snapshot']}",
+                f"   Expected impact: {row['expected_impact']}",
+            ]
+    return "\n".join(lines)
+
+
+def send_report_email(subject: str, body: str, recipients: List[str]) -> Tuple[bool, str]:
+    if "smtp" not in st.secrets:
+        return (
+            False,
+            "SMTP config missing. Add [smtp] in Streamlit secrets with host, port, username, password, from_email.",
+        )
+
+    smtp_cfg = st.secrets["smtp"]
+    required_fields = ["host", "port", "from_email"]
+    missing = [field for field in required_fields if field not in smtp_cfg]
+    if missing:
+        return False, f"SMTP config missing required fields: {', '.join(missing)}."
+
+    host = str(smtp_cfg["host"])
+    port = int(smtp_cfg["port"])
+    username = str(smtp_cfg.get("username", "")) if "username" in smtp_cfg else ""
+    password = str(smtp_cfg.get("password", "")) if "password" in smtp_cfg else ""
+    from_email = str(smtp_cfg["from_email"])
+    use_tls = bool(smtp_cfg.get("use_tls", True)) if "use_tls" in smtp_cfg else True
+    use_ssl = bool(smtp_cfg.get("use_ssl", False)) if "use_ssl" in smtp_cfg else False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+
+    try:
+        if use_ssl:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as server:
+                if username and password:
+                    server.login(username, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as server:
+                server.ehlo()
+                if use_tls:
+                    context = ssl.create_default_context()
+                    server.starttls(context=context)
+                    server.ehlo()
+                if username and password:
+                    server.login(username, password)
+                server.send_message(msg)
+        return True, f"Report email sent to {len(recipients)} recipient(s)."
+    except Exception as exc:
+        return False, f"Failed to send email: {exc}"
+
+
 def make_bucket_bar(
     counts_df: pd.DataFrame,
     bucket_col: str,
@@ -799,7 +1040,7 @@ multi_hold_df = filtered[filtered["hold_reason_count"] >= 1].copy()
 multi_hold_completed_df = multi_hold_df[multi_hold_df["is_completed"]].copy()
 multi_hold_open_df = multi_hold_df[~multi_hold_df["is_completed"]].copy()
 
-tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson = st.tabs(
+tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson, tab_report = st.tabs(
     [
         "Data Explorer",
         "Cycle Time Summary",
@@ -808,6 +1049,7 @@ tab_data, tab_cycle, tab_multi, tab_straight, tab_agent, tab_market, tab_reson =
         "Agent Broker Summary",
         "Market Analysis",
         "Reason",
+        "Report",
     ]
 )
 
@@ -1555,7 +1797,7 @@ with tab_agent:
             render_dataframe(styled, use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 0) Average TAT by Broker and Analyst (Top 10)")
+        st.markdown("### 0) Average TAT by Broker, Analyst, and Underwriter (Top 10)")
         st.caption("Uses completed cases with valid Net TAT and a minimum handled-case threshold of 10.")
 
         def top_people_high_tat(source_df: pd.DataFrame, person_col: str, min_cases: int, top_n: int) -> pd.DataFrame:
@@ -1613,8 +1855,9 @@ with tab_agent:
 
         top_brokers = top_people_high_tat(people_focus, "agent_broker_value", int(min_cases_people), top_n=10)
         top_analysts = top_people_high_tat(people_focus, "account_analyst_value", int(min_cases_people), top_n=10)
+        top_underwriters = top_people_high_tat(people_focus, "underwriter_value", int(min_cases_people), top_n=10)
 
-        t1, t2 = st.columns(2)
+        t1, t2, t3 = st.columns(3)
         with t1:
             if top_brokers.empty:
                 st.info("No broker meets the minimum handled case filter for Top 10 average TAT.")
@@ -1649,8 +1892,25 @@ with tab_agent:
                 add_bar_labels(fig_top_analyst, orientation="h", value_type="days", use_text_field=True)
                 fig_top_analyst.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Analyst")
                 render_plotly_chart(fig_top_analyst, use_container_width=True)
+        with t3:
+            if top_underwriters.empty:
+                st.info("No underwriter meets the minimum handled case filter for Top 10 average TAT.")
+            else:
+                fig_top_underwriter = px.bar(
+                    top_underwriters.sort_values("avg_tat_days", ascending=True),
+                    x="avg_tat_days",
+                    y="person",
+                    orientation="h",
+                    text="avg_tat_days",
+                    title="Average TAT by UnderwriterName (Top 10)",
+                    hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
+                    color_discrete_sequence=["#1f77b4"],
+                )
+                add_bar_labels(fig_top_underwriter, orientation="h", value_type="days", use_text_field=True)
+                fig_top_underwriter.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Underwriter")
+                render_plotly_chart(fig_top_underwriter, use_container_width=True)
 
-        r1, r2 = st.columns(2)
+        r1, r2, r3 = st.columns(3)
         with r1:
             hold_top_broker, reason_top_broker = top_reason_sets_for_people(
                 people_focus,
@@ -1724,6 +1984,43 @@ with tab_agent:
                 add_bar_labels(fig_reason_analyst_top5, orientation="h", value_type="percent")
                 fig_reason_analyst_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Reason Description")
                 render_plotly_chart(fig_reason_analyst_top5, use_container_width=True)
+
+        with r3:
+            hold_top_underwriter, reason_top_underwriter = top_reason_sets_for_people(
+                people_focus,
+                "underwriter_value",
+                top_underwriters["person"].astype(str).tolist() if not top_underwriters.empty else [],
+            )
+            if hold_top_underwriter.empty:
+                st.info("No hold reason data for Top 5 high-TAT underwriters.")
+            else:
+                fig_hold_underwriter_top5 = px.bar(
+                    hold_top_underwriter.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Hold Reasons for Top 5 High-TAT UnderwriterName",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#7f7f7f"],
+                )
+                add_bar_labels(fig_hold_underwriter_top5, orientation="h", value_type="percent")
+                fig_hold_underwriter_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
+                render_plotly_chart(fig_hold_underwriter_top5, use_container_width=True)
+            if reason_top_underwriter.empty:
+                st.info("No reason description data for Top 5 high-TAT underwriters.")
+            else:
+                fig_reason_underwriter_top5 = px.bar(
+                    reason_top_underwriter.sort_values("share_pct", ascending=True),
+                    x="share_pct",
+                    y="reason",
+                    orientation="h",
+                    title="Top Reason Descriptions for Top 5 High-TAT UnderwriterName",
+                    hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
+                    color_discrete_sequence=["#8c564b"],
+                )
+                add_bar_labels(fig_reason_underwriter_top5, orientation="h", value_type="percent")
+                fig_reason_underwriter_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Reason Description")
+                render_plotly_chart(fig_reason_underwriter_top5, use_container_width=True)
 
         st.markdown("---")
         st.markdown("### 1) Account Analyst")
@@ -2404,6 +2701,86 @@ with tab_reson:
             dim_col="agent_broker_value",
             y_label="Agent Broker",
         )
+
+with tab_report:
+    st.subheader("Prescriptive Report")
+    st.caption("Top 5 focus recommendations to reduce TAT, generated from current filtered data.")
+
+    rec_df = build_prescriptive_recommendations(
+        filtered,
+        completed_df,
+        open_df,
+        metadata.get("hold_reason_col"),
+    )
+    report_text = build_report_text(rec_df, total_cases, completed_df, open_df)
+
+    rpt1, rpt2, rpt3, rpt4 = st.columns(4)
+    completed_valid_report = completed_df[completed_df["net_tat_days"].notna()].copy()
+    avg_tat_report = completed_valid_report["net_tat_days"].mean() if not completed_valid_report.empty else np.nan
+    p90_tat_report = completed_valid_report["net_tat_days"].quantile(0.9) if not completed_valid_report.empty else np.nan
+    over7_share_report = (
+        pct_value((completed_valid_report["net_tat_days"] > 7).sum(), len(completed_valid_report))
+        if not completed_valid_report.empty
+        else np.nan
+    )
+    rpt1.metric("Total Cases", f"{total_cases:,}")
+    rpt2.metric("Completed Cases", f"{len(completed_df):,}")
+    rpt3.metric("Avg Net TAT", f"{avg_tat_report:.2f} days" if pd.notna(avg_tat_report) else "NA")
+    rpt4.metric("% Net TAT > 7 days", f"{over7_share_report:.2f}%" if pd.notna(over7_share_report) else "NA")
+    st.metric("P90 Net TAT", f"{p90_tat_report:.2f} days" if pd.notna(p90_tat_report) else "NA")
+
+    st.markdown("### Top 5 Prescriptive Recommendations")
+    if rec_df.empty:
+        st.info("No recommendation rows available for current filters.")
+    else:
+        rec_display_cols = [c for c in rec_df.columns if c != "hold_reason"]
+        render_dataframe(
+            rec_df[rec_display_cols].style.format({"priority": "{:,.0f}"}),
+            use_container_width=True,
+        )
+        for _, row in rec_df.iterrows():
+            st.markdown(
+                f"{int(row['priority'])}. **{row['focus_area']}**: {row['recommendation']}  \n"
+                f"Hold reason: {row.get('hold_reason', 'NA')}  \n"
+                f"Metric: {row['metric_snapshot']}  \n"
+                f"Expected impact: {row['expected_impact']}"
+            )
+
+    st.download_button(
+        "Download Report (.txt)",
+        data=report_text,
+        file_name=f"auto_issuance_prescriptive_report_{pd.Timestamp.now().strftime('%Y%m%d')}.txt",
+        mime="text/plain",
+        key="download_prescriptive_report",
+    )
+
+    st.markdown("---")
+    st.markdown("### Send Report by Email")
+    recipients_raw = st.text_area(
+        "Recipients (comma separated emails)",
+        value="",
+        key="report_recipients",
+        placeholder="example1@company.com, example2@company.com",
+    )
+    default_subject = f"Auto Issuance Prescriptive Report - {pd.Timestamp.now().strftime('%Y-%m-%d')}"
+    email_subject = st.text_input("Email Subject", value=default_subject, key="report_email_subject")
+
+    if st.button("Send Report Email", key="send_report_email_button"):
+        recipients = [item.strip() for item in re.split(r"[;,\\n]+", recipients_raw) if item.strip()]
+        recipients = [item for item in recipients if "@" in item]
+        if not recipients:
+            st.error("Please enter at least one valid recipient email.")
+        else:
+            success, message = send_report_email(email_subject, report_text, recipients)
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+
+    st.caption(
+        "Email setup: configure `.streamlit/secrets.toml` with [smtp] host, port, from_email, "
+        "username, password, and optional use_tls/use_ssl."
+    )
 
 with tab_data:
     st.subheader("Data Explorer")
