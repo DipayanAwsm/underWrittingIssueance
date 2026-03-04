@@ -218,6 +218,7 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         ["underwritingSegmentDescription", "underwriting_segment_description"],
     )
     underwriter_col = find_column(df, ["underwriterName", "underwriter", "underwriter_name"])
+    rater_full_name_col = find_column(df, ["raterFullName", "rater_full_name"])
     agent_broker_col = find_column(df, ["AgentBrokerName", "agentBrokerName", "AgentBrokerName__2"])
     account_analyst_col = find_column(df, ["accountAnalystName", "accountAnalyst", "account_analyst_name"])
     write_out_reason_col = find_column(
@@ -275,6 +276,12 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         df["underwriter_value"] = df[underwriter_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     else:
         df["underwriter_value"] = "Unknown"
+    if rater_full_name_col is not None:
+        df["rater_full_name_value"] = (
+            df[rater_full_name_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+        )
+    else:
+        df["rater_full_name_value"] = "Unknown"
     if agent_broker_col is not None:
         df["agent_broker_value"] = df[agent_broker_col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
     else:
@@ -358,6 +365,7 @@ def prepare_data(raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional
         "lob_desc_col": lob_desc_col,
         "underwriting_segment_col": underwriting_segment_col,
         "underwriter_col": underwriter_col,
+        "rater_full_name_col": rater_full_name_col,
         "agent_broker_col": agent_broker_col,
         "account_analyst_col": account_analyst_col,
         "write_out_reason_col": write_out_reason_col,
@@ -1797,7 +1805,7 @@ with tab_agent:
             render_dataframe(styled, use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 0) Average TAT by Broker, Analyst, and Underwriter (Top 10)")
+        st.markdown("### 0) Average TAT by Broker, Analyst, and Rater Full Name (Top 10)")
         st.caption("Uses completed cases with valid Net TAT and a minimum handled-case threshold of 10.")
 
         def top_people_high_tat(source_df: pd.DataFrame, person_col: str, min_cases: int, top_n: int) -> pd.DataFrame:
@@ -1855,7 +1863,7 @@ with tab_agent:
 
         top_brokers = top_people_high_tat(people_focus, "agent_broker_value", int(min_cases_people), top_n=10)
         top_analysts = top_people_high_tat(people_focus, "account_analyst_value", int(min_cases_people), top_n=10)
-        top_underwriters = top_people_high_tat(people_focus, "underwriter_value", int(min_cases_people), top_n=10)
+        top_raters = top_people_high_tat(people_focus, "rater_full_name_value", int(min_cases_people), top_n=10)
 
         t1, t2, t3 = st.columns(3)
         with t1:
@@ -1893,21 +1901,21 @@ with tab_agent:
                 fig_top_analyst.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Analyst")
                 render_plotly_chart(fig_top_analyst, use_container_width=True)
         with t3:
-            if top_underwriters.empty:
-                st.info("No underwriter meets the minimum handled case filter for Top 10 average TAT.")
+            if top_raters.empty:
+                st.info("No raterFullName meets the minimum handled case filter for Top 10 average TAT.")
             else:
                 fig_top_underwriter = px.bar(
-                    top_underwriters.sort_values("avg_tat_days", ascending=True),
+                    top_raters.sort_values("avg_tat_days", ascending=True),
                     x="avg_tat_days",
                     y="person",
                     orientation="h",
                     text="avg_tat_days",
-                    title="Average TAT by UnderwriterName (Top 10)",
+                    title="Average TAT by raterFullName (Top 10)",
                     hover_data={"cases": ":,.0f", "avg_tat_days": ":.2f", "p90_tat_days": ":.2f"},
                     color_discrete_sequence=["#1f77b4"],
                 )
                 add_bar_labels(fig_top_underwriter, orientation="h", value_type="days", use_text_field=True)
-                fig_top_underwriter.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="Underwriter")
+                fig_top_underwriter.update_layout(xaxis_title="Average Net TAT (days)", yaxis_title="raterFullName")
                 render_plotly_chart(fig_top_underwriter, use_container_width=True)
 
         r1, r2, r3 = st.columns(3)
@@ -1988,18 +1996,18 @@ with tab_agent:
         with r3:
             hold_top_underwriter, reason_top_underwriter = top_reason_sets_for_people(
                 people_focus,
-                "underwriter_value",
-                top_underwriters["person"].astype(str).tolist() if not top_underwriters.empty else [],
+                "rater_full_name_value",
+                top_raters["person"].astype(str).tolist() if not top_raters.empty else [],
             )
             if hold_top_underwriter.empty:
-                st.info("No hold reason data for Top 5 high-TAT underwriters.")
+                st.info("No hold reason data for Top 5 high-TAT raterFullName.")
             else:
                 fig_hold_underwriter_top5 = px.bar(
                     hold_top_underwriter.sort_values("share_pct", ascending=True),
                     x="share_pct",
                     y="reason",
                     orientation="h",
-                    title="Top Hold Reasons for Top 5 High-TAT UnderwriterName",
+                    title="Top Hold Reasons for Top 5 High-TAT raterFullName",
                     hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
                     color_discrete_sequence=["#7f7f7f"],
                 )
@@ -2007,14 +2015,14 @@ with tab_agent:
                 fig_hold_underwriter_top5.update_layout(xaxis_title="Share (%)", yaxis_title="Hold Reason")
                 render_plotly_chart(fig_hold_underwriter_top5, use_container_width=True)
             if reason_top_underwriter.empty:
-                st.info("No reason description data for Top 5 high-TAT underwriters.")
+                st.info("No reason description data for Top 5 high-TAT raterFullName.")
             else:
                 fig_reason_underwriter_top5 = px.bar(
                     reason_top_underwriter.sort_values("share_pct", ascending=True),
                     x="share_pct",
                     y="reason",
                     orientation="h",
-                    title="Top Reason Descriptions for Top 5 High-TAT UnderwriterName",
+                    title="Top Reason Descriptions for Top 5 High-TAT raterFullName",
                     hover_data={"cases": ":,.0f", "share_pct": ":.2f"},
                     color_discrete_sequence=["#8c564b"],
                 )
@@ -2798,6 +2806,7 @@ with tab_data:
         ("lob_desc_value", "categorical"),
         ("underwriting_segment_value", "categorical"),
         ("underwriter_value", "categorical"),
+        ("rater_full_name_value", "categorical"),
         ("account_analyst_value", "categorical"),
         ("agent_broker_value", "categorical"),
         ("is_completed", "boolean"),
@@ -2883,6 +2892,7 @@ with tab_data:
         "lob_desc_value",
         "underwriting_segment_value",
         "underwriter_value",
+        "rater_full_name_value",
         "account_analyst_value",
         "agent_broker_value",
         "is_completed",
