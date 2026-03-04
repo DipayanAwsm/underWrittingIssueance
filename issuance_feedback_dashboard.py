@@ -2196,6 +2196,36 @@ with tab_agent:
                     denom_cases=max(len(broker_over7), 1),
                 )
 
+        st.markdown("---")
+        st.markdown("### 3) raterFullName")
+        raters = eligible_names(people_focus, "rater_full_name_value", int(min_cases_people))
+        if not raters:
+            st.info("No raterFullName meets the minimum case threshold for month-wise KPI table.")
+        else:
+            rater_choice = st.selectbox(
+                "Select raterFullName (eligible group)",
+                ["All"] + raters,
+                key="people_rater",
+            )
+            rater_scope = people_focus[people_focus["rater_full_name_value"].isin(raters)].copy()
+            if rater_choice != "All":
+                rater_scope = rater_scope[rater_scope["rater_full_name_value"] == rater_choice].copy()
+
+            make_bucket_month_bar(
+                rater_scope,
+                bucket_col="tat_bucket",
+                title=f"Month-wise TAT Bucket (%) - raterFullName: {rater_choice}",
+                color_map=TAT_BUCKET_COLORS,
+                category_order=TAT_BUCKET_ORDER,
+            )
+            rater_kpi = monthly_people_kpi_table(
+                filtered,
+                person_col="rater_full_name_value",
+                eligible_people=raters,
+                selected_person=rater_choice,
+            )
+            render_tat_kpi_table(rater_kpi, "#### Month-wise KPI Table (raterName)")
+
 with tab_straight:
     st.subheader("Straight Through Cases")
     straight_completed_tat = completed_straight_df[completed_straight_df["net_tat_days"].notna()].copy()
